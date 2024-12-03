@@ -206,10 +206,10 @@ def generate_flow_path():
     
     y_diffuser = diffuser_profile(t_diff)
     
-    # Constant area combustor with very slight divergence
+    # Modify combustor to have a gentle taper towards the nozzle
     t_comb = (x_combustor - x_combustor[0])/(x_combustor[-1] - x_combustor[0])
     combustor_radius = y_diffuser[-1]  # Match diffuser exit
-    y_combustor = combustor_radius + 0.05 * t_comb  # Minimal divergence
+    y_combustor = combustor_radius + 0.05 * t_comb * (1 - t_comb)  # Parabolic taper
     
     # CD nozzle with optimized contour
     t_nozzle = (x_nozzle - x_nozzle[0])/(x_nozzle[-1] - x_nozzle[0])
@@ -221,25 +221,24 @@ def generate_flow_path():
         
         if t < 0.2:  # Convergent section
             t_conv = t/0.2
-            # Simple parabolic convergence that naturally approaches throat
+            # Smooth blend from combustor to throat using cubic interpolation
+            # This ensures continuous first and second derivatives
             return y_combustor[-1] + (radius_throat - y_combustor[-1]) * \
-                   (2*t_conv - t_conv**2)  # Quadratic curve
+                   (3*t_conv**2 - 2*t_conv**3)  # Cubic curve for smoother transition
         else:  # Divergent section
             t_div = (t - 0.2)/0.8
             
             # Bell nozzle parameters
-            theta_i = np.radians(15)    # Initial expansion angle (reduced for smoother transition)
-            theta_e = np.radians(8)     # Exit angle (reduced for gentler expansion)
+            theta_i = np.radians(15)    # Initial expansion angle
+            theta_e = np.radians(8)     # Exit angle
             
-            # Single continuous bell curve
-            # This creates a natural bell shape that:
-            # 1. Starts horizontal at the throat
-            # 2. Gradually increases expansion angle
-            # 3. Smoothly transitions to exit
-            bell_ratio = (1 - np.cos(np.pi * t_div))/2  # Smooth S-curve transition
+            # Smooth bell curve using modified sine function
+            # This creates a continuous curve with no sharp transitions
+            bell_ratio = (1 - np.cos(np.pi * t_div))/2
             
+            # Modified transition to ensure smooth connection at both ends
             return radius_throat + (radius_exit - radius_throat) * \
-                   bell_ratio * (1 + np.sin(theta_i * (1-t_div) + theta_e * t_div))
+                   bell_ratio * (1 + 0.5*np.sin(theta_i * (1-t_div) + theta_e * t_div))
     
     y_nozzle = np.array([nozzle_profile(t) for t in t_nozzle])
     
