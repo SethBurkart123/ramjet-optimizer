@@ -7,8 +7,8 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # Simulation control parameters
-SIM_POPSIZE = 30        # Population size for optimization
-SIM_MAXITER = 250       # Maximum iterations
+SIM_POPSIZE = 20        # Population size for optimization
+SIM_MAXITER = 50       # Maximum iterations
 SIM_TOL = 1e-6         # Convergence tolerance
 RANDOM_SEED = None      # Set to None for random results, or an integer for reproducible results
 
@@ -59,41 +59,49 @@ def shock_properties(M1, beta, theta):
 
 def optimize_geometry():
     """Optimize key geometric parameters with improved constraints."""
-    # Define bounds for M=2.5 outside the objective function
+    # Modify bounds to be more physically constrained
     bounds = [
-        (4.0, 9.0),     # radius_inlet (increased minimum)
-        (3.5, 8.0),     # radius_throat (adjusted for higher compression)
-        (4.5, 9.5),     # radius_exit (increased for higher expansion)
-        (15.0, 25.0),   # spike_length (longer for better compression)
-        (12.0, 18.0),   # theta1 (increased angles for stronger shocks)
-        (14.0, 20.0)    # theta2 (increased for higher compression)
+        (4.0, 9.0),     # radius_inlet
+        (4.5, 6.5),     # radius_throat - tightened range based on inlet
+        (6.0, 8.5),     # radius_exit - must be larger than throat
+        (15.0, 25.0),   # spike_length
+        (12.0, 18.0),   # theta1
+        (14.0, 20.0)    # theta2
     ]
 
     def objective(params):
         radius_inlet, radius_throat, radius_exit, spike_length, theta1, theta2 = params
         
         try:
-            # Adjust shock angles for M=2.5
+            # Calculate shock properties as before
             beta1 = oblique_shock_angle(M0, np.radians(theta1))
             M1, P1_P0, T1_T0 = shock_properties(M0, beta1, np.radians(theta1))
             
-            # Second shock should be weaker to avoid separation
             beta2 = oblique_shock_angle(M1, np.radians(theta2-theta1))
             M2, P2_P1, T2_T1 = shock_properties(M1, beta2, np.radians(theta2-theta1))
             
-            # Calculate performance with real gas effects
-            T1 = T0 * (1 + (gamma-1)/2 * M0**2)
+            # Calculate flow properties
+            T1 = T0 * T1_T0
             gamma_T, R_T = real_gas_properties(M0, T1)
-            
-            # Calculate total pressure recovery
             P_recovery = P1_P0 * P2_P1
             
             # Calculate mass flow and thrust
             A_inlet = np.pi * radius_inlet**2
-            mdot = P0/(R_T*T0) * M0 * np.sqrt(gamma_T*R_T*T0) * A_inlet
+            A_throat = np.pi * radius_throat**2
+            A_exit = np.pi * radius_exit**2
             
-            # Enhanced penalties for better constraints
+            # Add area ratio constraints based on compressible flow theory
+            A_Astar_inlet = ((gamma_T+1)/2)**(-(gamma_T+1)/(2*(gamma_T-1))) * \
+                           (1 + (gamma_T-1)/2 * M0**2)**((gamma_T+1)/(2*(gamma_T-1))) / M0
+            
+            # Calculate ideal area ratios
+            A_ratio_inlet = A_inlet/A_throat
+            A_ratio_exit = A_exit/A_throat
+            
+            # Enhanced penalties with physical meaning
             penalties = 0
+            
+            # Geometric constraints
             if radius_inlet >= radius_outer:
                 penalties += 1000 * (radius_inlet - radius_outer)
             if radius_throat >= radius_inlet:
@@ -103,10 +111,22 @@ def optimize_geometry():
             if spike_length >= total_length/3:
                 penalties += 1000 * (spike_length - total_length/3)
             
-            # Multi-objective optimization
+            # Area ratio penalties
+            area_ratio_penalty = 100 * abs(A_ratio_inlet - A_Astar_inlet)
+            penalties += area_ratio_penalty
+            
+            # Nozzle expansion penalties
+            ideal_exit_ratio = 1.5 * A_ratio_inlet  # Approximate ideal expansion
+            exit_ratio_penalty = 100 * abs(A_ratio_exit - ideal_exit_ratio)
+            penalties += exit_ratio_penalty
+            
+            # Calculate performance metrics
+            mdot = P0/(R_T*T0) * M0 * np.sqrt(gamma_T*R_T*T0) * A_inlet
             thrust_term = mdot * P_recovery
             drag_term = calculate_drag(radius_inlet, spike_length, M0)
-            efficiency = thrust_term / (1 + drag_term)
+            
+            # Modified efficiency calculation
+            efficiency = thrust_term / (1 + drag_term) * (1 - area_ratio_penalty/1000)
             
             return -efficiency + penalties
             
