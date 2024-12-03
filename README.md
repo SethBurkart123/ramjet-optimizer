@@ -42,18 +42,18 @@ Each run produces slightly different exit geometries because:
 ## Usage 
 
 # Run basic optimization and visualization
-`python ramjet_design.py`
+```python ramjet_design.py```
 
 # For multiple optimization runs
-`for i in range(5):
+```for i in range(5):
     plot_ramjet()
-    calculate_performance()`
+    calculate_performance()```
 
 ## Optimization Parameters
 
-`SIM_POPSIZE = 20        # Population size
+```SIM_POPSIZE = 20        # Population size
 SIM_MAXITER = 50        # Maximum iterations
-SIM_TOL = 1e-6         # Convergence tolerance`
+SIM_TOL = 1e-6         # Convergence tolerance```
 
 ## Dependencies
 
@@ -64,9 +64,9 @@ SIM_TOL = 1e-6         # Convergence tolerance`
 
 ## Installation
 
-`git clone https://github.com/SethBurkart123/ramjet-optimizer.git
+```git clone https://github.com/SethBurkart123/ramjet-optimizer.git
 cd ramjet-optimizer
-pip install -r requirements.txt`
+pip install -r requirements.txt```
 
 ## Theory of Operation
 
