@@ -7,7 +7,7 @@ gamma = 1.4  # Ratio of specific heats for air
 R = 287.0    # Gas constant for air [J/kg·K]
 T0 = 288.15  # Freestream temperature [K]
 P0 = 101325  # Freestream pressure [Pa]
-M0 = 2.5     # Design Mach number for ramjet
+M0 = 1.5     # Design Mach number for ramjet
 
 # Geometric constraints (all in mm)
 total_length = 100.0   
@@ -76,12 +76,12 @@ def optimize_geometry():
             return 1e10
     
     # Initial guess and bounds
-    x0 = [6.0, 5.0, 8.5, 25.0, 12.0, 14.0]  # Initial values
+    x0 = [6.0, 5.0, 8.5, 15.0, 12.0, 14.0]  # Reduced initial spike length
     bounds = [
         (3.0, 9.0),    # radius_inlet
         (3.0, 8.0),    # radius_throat
         (4.0, 9.5),    # radius_exit
-        (15.0, 35.0),  # spike_length
+        (12.0, 20.0),  # spike_length (reduced range)
         (8.0, 16.0),   # theta1
         (10.0, 18.0)   # theta2
     ]
@@ -91,78 +91,83 @@ def optimize_geometry():
     return result.x
 
 def generate_spike_profile():
-    """Generate optimized spike profile with proper back design."""
-    # Get optimized parameters
+    """Generate optimized spike profile with internal support structure."""
     params = optimize_geometry()
     radius_inlet, _, _, spike_length, theta1, theta2 = params
     
-    # Front cone sections
-    x1 = np.linspace(0, spike_length*0.6, 30)
-    y1 = x1 * np.tan(np.radians(theta1))
+    # Create more gradual curved profile for external part
+    x_external = np.linspace(0, spike_length, 40)
     
-    x2 = np.linspace(spike_length*0.6, spike_length, 20)
-    y2 = y1[-1] + (x2 - x1[-1]) * np.tan(np.radians(theta2))
+    def compression_curve(x):
+        t = x/spike_length
+        angle = theta1 * np.sin(np.pi * t/2) * (1 - t)
+        return np.cumsum(np.tan(np.radians(angle))) * (x[1] - x[0])
     
-    # Add spike back design (curved profile)
-    x_back = np.linspace(spike_length, spike_length*1.2, 15)
+    y_external = compression_curve(x_external)
     
-    # Bezier curve for smooth transition
-    t = (x_back - x_back[0])/(x_back[-1] - x_back[0])
-    y_back = y2[-1] * (1 - t)**2  # Quadratic bezier for smooth closure
+    # Add internal support section (extends into diffuser)
+    internal_length = spike_length * 0.5  # Support extends 50% more into engine
+    x_internal = np.linspace(spike_length, spike_length + internal_length, 20)
     
-    # Combine all sections
-    x = np.concatenate([x1, x2, x_back])
-    y = np.concatenate([y1, y2, y_back])
+    # Create support strut profile (tapered cylinder)
+    y_internal = y_external[-1] * np.exp(-(x_internal - spike_length)/(internal_length/3))
     
-    # Calculate flow properties
-    beta1 = oblique_shock_angle(M0, np.radians(theta1))
-    M1, P1_P0, T1_T0 = shock_properties(M0, beta1, np.radians(theta1))
+    # Combine profiles
+    x = np.concatenate([x_external, x_internal])
+    y = np.concatenate([y_external, y_internal])
     
-    beta2 = oblique_shock_angle(M1, np.radians(theta2-theta1))
-    M2, P2_P1, T2_T1 = shock_properties(M1, beta2, np.radians(theta2-theta1))
+    # Calculate flow properties for curved profile
+    # Use average angle for property calculations
+    avg_theta = np.arctan(np.gradient(y, x)[len(x)//2])
+    beta1 = oblique_shock_angle(M0, avg_theta)
+    M1, P1_P0, T1_T0 = shock_properties(M0, beta1, avg_theta)
+    
+    # Second compression through curved section
+    avg_theta2 = np.arctan(np.gradient(y, x)[3*len(x)//4]) - avg_theta
+    beta2 = oblique_shock_angle(M1, avg_theta2)
+    M2, P2_P1, T2_T1 = shock_properties(M1, beta2, avg_theta2)
     
     return x, y, M2, P1_P0*P2_P1, T1_T0*T2_T1, params
 
 def generate_flow_path():
-    """Generate flow path using optimized parameters."""
+    """Generate flow path with more gradual compression."""
     # Get optimized geometry
     _, _, M_diff, P_diff, T_diff, params = generate_spike_profile()
     radius_inlet, radius_throat, radius_exit, spike_length, _, _ = params
     
-    cowl_start_x = spike_length * 0.8  # Start cowl before spike tip for shock capture
+    # Start cowl slightly before spike tip for shock capture
+    cowl_start_x = spike_length * 0.8
     
-    # Normal shock at diffuser entrance
-    M_after_normal = np.sqrt((1 + (gamma-1)/2 * M_diff**2)/(gamma*M_diff**2 - (gamma-1)/2))
-    P_normal = P_diff * (1 + 2*gamma/(gamma+1) * (M_diff**2 - 1))
+    # Generate sections with smooth transitions
+    x_diffuser = np.linspace(cowl_start_x, cowl_start_x + 20, 30)
+    x_combustor = np.linspace(x_diffuser[-1], x_diffuser[-1] + 45, 30)
+    x_nozzle = np.linspace(x_combustor[-1], total_length, 30)
     
-    # Subsonic diffuser
-    area_ratio = radius_inlet**2/radius_throat**2
-    
-    # Generate geometry sections
-    x_diffuser = np.linspace(cowl_start_x, cowl_start_x + 15, 20)
-    x_combustor = np.linspace(x_diffuser[-1], x_diffuser[-1] + 45, 20)
-    x_nozzle = np.linspace(x_combustor[-1], total_length, 20)
-    
-    # Diffuser profile with smooth compression
+    # More gradual diffuser profile
     t_diff = (x_diffuser - x_diffuser[0])/(x_diffuser[-1] - x_diffuser[0])
-    y_diffuser = radius_outer - (radius_outer - radius_inlet)*(1 - np.sin(np.pi*t_diff/2))
+    # Smoother lip curve
+    lip_curve = 0.2 * np.sin(np.pi * t_diff[t_diff < 0.3])
+    y_diffuser = radius_outer - (radius_outer - radius_inlet) * \
+                 (1 - np.sin(np.pi * t_diff/3))  # More gradual compression
+    y_diffuser[:int(0.3*len(t_diff))] += lip_curve
     
-    # Constant area combustor
-    y_combustor = radius_outer * np.ones_like(x_combustor)
+    # Constant area combustor with slight divergence for boundary layer
+    t_comb = (x_combustor - x_combustor[0])/(x_combustor[-1] - x_combustor[0])
+    y_combustor = radius_outer + 0.2 * t_comb  # Slight divergence
     
-    # Optimized CD nozzle profile
+    # Improved CD nozzle with smooth transitions
     t_nozzle = (x_nozzle - x_nozzle[0])/(x_nozzle[-1] - x_nozzle[0])
     
-    # Converging section
-    y_conv = radius_outer - (radius_outer - radius_throat)*np.sin(np.pi*t_nozzle/2)
+    # Bell-shaped nozzle profile
+    def bell_nozzle(t):
+        # Combination of parabolic and exponential curves
+        return radius_throat + (radius_exit - radius_throat) * \
+               (1.5 * t - 0.5 * t**2) * (1 - np.exp(-3*t))
     
-    # Diverging section optimized for M=2.5 exit
-    A_Astar = lambda M: ((gamma+1)/2)**(-((gamma+1)/(2*(gamma-1)))) * \
-              (1/M) * (1 + ((gamma-1)/2)*M**2)**((gamma+1)/(2*(gamma-1)))
-    
-    exit_area_ratio = A_Astar(2.5)
-    y_nozzle = np.where(t_nozzle <= 0.5, y_conv,
-                        radius_throat + (radius_exit - radius_throat)*(2*(t_nozzle-0.5)))
+    y_nozzle = np.where(t_nozzle <= 0.3,
+                        y_combustor[-1] + (radius_throat - y_combustor[-1]) * \
+                        (1 - np.cos(np.pi * t_nozzle/0.3))/2,
+                        bell_nozzle(t_nozzle))
     
     # Combine all sections
     x = np.concatenate([x_diffuser, x_combustor, x_nozzle])
