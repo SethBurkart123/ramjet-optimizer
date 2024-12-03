@@ -64,7 +64,7 @@ SIM_TOL = 1e-6         # Convergence tolerance`
 
 ## Installation
 
-`git clone https://github.com/yourusername/ramjet-optimizer.git
+`git clone https://github.com/SethBurkart123/ramjet-optimizer.git
 cd ramjet-optimizer
 pip install -r requirements.txt`
 
@@ -98,12 +98,6 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - Based on modern supersonic combustion theory
 - Incorporates real gas effects from NASA technical papers
 - Optimization approach inspired by recent advances in computational fluid dynamics
-
-## Contact
-
-For questions and feedback:
-- Create an issue in this repository
-- Email: your.email@example.com
 
 ---
 **Note**: This is a research-grade tool and should be used with appropriate understanding of supersonic flow physics and ramjet operation principles.

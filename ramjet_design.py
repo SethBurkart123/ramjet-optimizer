@@ -7,8 +7,8 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # Simulation control parameters
-SIM_POPSIZE = 20        # Population size for optimization
-SIM_MAXITER = 50       # Maximum iterations
+SIM_POPSIZE = 30        # Population size for optimization
+SIM_MAXITER = 250       # Maximum iterations
 SIM_TOL = 1e-6         # Convergence tolerance
 RANDOM_SEED = None      # Set to None for random results, or an integer for reproducible results
 
