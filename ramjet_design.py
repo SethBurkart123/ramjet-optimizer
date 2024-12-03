@@ -180,7 +180,7 @@ def generate_spike_profile():
     return x, y, M2, P1_P0*P2_P1, T1_T0*T2_T1, params
 
 def generate_flow_path():
-    """Generate flow path with improved compression for M=2.5."""
+    """Generate flow path with improved compression and combustion features."""
     _, _, M_diff, P_diff, T_diff, params = generate_spike_profile()
     radius_inlet, radius_throat, radius_exit, spike_length, _, _ = params
     
@@ -206,10 +206,37 @@ def generate_flow_path():
     
     y_diffuser = diffuser_profile(t_diff)
     
-    # Modify combustor to have a gentle taper towards the nozzle
+    # Modify combustor to include flame holder and fuel injection
     t_comb = (x_combustor - x_combustor[0])/(x_combustor[-1] - x_combustor[0])
     combustor_radius = y_diffuser[-1]  # Match diffuser exit
-    y_combustor = combustor_radius + 0.05 * t_comb * (1 - t_comb)  # Parabolic taper
+    
+    def combustor_profile(t):
+        """Generate combustor profile with flame holding features."""
+        base_radius = combustor_radius + 0.05 * t * (1 - t)  # Basic parabolic taper
+        
+        # Add flame holder recirculation zone at 30% of combustor length
+        flame_holder_pos = 0.3
+        flame_holder_width = 0.1
+        flame_holder_depth = 0.3  # Reduced from 0.5 mm
+        
+        # Create smooth recess for flame holder
+        if abs(t - flame_holder_pos) < flame_holder_width/2:
+            dx = (t - flame_holder_pos)/(flame_holder_width/2)
+            return base_radius + flame_holder_depth * np.exp(-4*dx**2)
+        
+        # Add fuel injector protrusion at 20% of combustor length
+        injector_pos = 0.2
+        injector_width = 0.05
+        injector_height = 0.2  # Reduced from 0.3 mm
+        
+        if abs(t - injector_pos) < injector_width/2:
+            # Smooth bump for fuel injector
+            dx = (t - injector_pos)/(injector_width/2)
+            return base_radius - injector_height * np.exp(-4*dx**2)
+            
+        return base_radius
+    
+    y_combustor = np.array([combustor_profile(t) for t in t_comb])
     
     # CD nozzle with optimized contour
     t_nozzle = (x_nozzle - x_nozzle[0])/(x_nozzle[-1] - x_nozzle[0])
