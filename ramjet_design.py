@@ -5,6 +5,12 @@ from scipy.optimize import differential_evolution
 import warnings
 warnings.filterwarnings('ignore')
 
+# Simulation control parameters
+SIM_POPSIZE = 20        # Population size for optimization
+SIM_MAXITER = 50       # Maximum iterations
+SIM_TOL = 1e-6         # Convergence tolerance
+RANDOM_SEED = None      # Set to None for random results, or an integer for reproducible results
+
 # Physical constants
 gamma = 1.4  # Ratio of specific heats for air
 R = 287.0    # Gas constant for air [J/kg·K]
@@ -106,14 +112,17 @@ def optimize_geometry():
         except:
             return 1e10
     
-    # Use differential evolution for better global optimization
+    # Use differential evolution with more iterations and larger population
     result = differential_evolution(
         objective, 
         bounds, 
-        popsize=20,
+        popsize=SIM_POPSIZE,
         mutation=(0.5, 1.0),
         recombination=0.7,
-        maxiter=100
+        maxiter=SIM_MAXITER,
+        tol=SIM_TOL,
+        seed=RANDOM_SEED,
+        polish=True
     )
     return result.x
 
@@ -206,13 +215,31 @@ def generate_flow_path():
     t_nozzle = (x_nozzle - x_nozzle[0])/(x_nozzle[-1] - x_nozzle[0])
     
     def nozzle_profile(t):
-        # Method of characteristics-inspired contour
+        """Generate a bell nozzle contour with smooth transitions."""
+        # Throat radius of curvature
+        Rc = 1.5 * radius_throat
+        
         if t < 0.2:  # Convergent section
-            return y_combustor[-1] + (radius_throat - y_combustor[-1]) * (t/0.2)**2
+            t_conv = t/0.2
+            # Simple parabolic convergence that naturally approaches throat
+            return y_combustor[-1] + (radius_throat - y_combustor[-1]) * \
+                   (2*t_conv - t_conv**2)  # Quadratic curve
         else:  # Divergent section
-            t_adj = (t - 0.2)/0.8
+            t_div = (t - 0.2)/0.8
+            
+            # Bell nozzle parameters
+            theta_i = np.radians(15)    # Initial expansion angle (reduced for smoother transition)
+            theta_e = np.radians(8)     # Exit angle (reduced for gentler expansion)
+            
+            # Single continuous bell curve
+            # This creates a natural bell shape that:
+            # 1. Starts horizontal at the throat
+            # 2. Gradually increases expansion angle
+            # 3. Smoothly transitions to exit
+            bell_ratio = (1 - np.cos(np.pi * t_div))/2  # Smooth S-curve transition
+            
             return radius_throat + (radius_exit - radius_throat) * \
-                   (1.5 * t_adj - 0.5 * t_adj**2)
+                   bell_ratio * (1 + np.sin(theta_i * (1-t_div) + theta_e * t_div))
     
     y_nozzle = np.array([nozzle_profile(t) for t in t_nozzle])
     
