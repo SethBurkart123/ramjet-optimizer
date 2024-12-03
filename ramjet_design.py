@@ -2,12 +2,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import fsolve
 from scipy.optimize import differential_evolution
+from tqdm.auto import tqdm
 import warnings
 warnings.filterwarnings('ignore')
 
 # Simulation control parameters
-SIM_POPSIZE = 20        # Population size for optimization
-SIM_MAXITER = 50       # Maximum iterations
+SIM_POPSIZE = 30        # Population size for optimization
+SIM_MAXITER = 250       # Maximum iterations
 SIM_TOL = 1e-6         # Convergence tolerance
 RANDOM_SEED = None      # Set to None for random results, or an integer for reproducible results
 
@@ -67,7 +68,7 @@ def optimize_geometry():
         (12.0, 18.0),   # theta1 (increased angles for stronger shocks)
         (14.0, 20.0)    # theta2 (increased for higher compression)
     ]
-    
+
     def objective(params):
         radius_inlet, radius_throat, radius_exit, spike_length, theta1, theta2 = params
         
@@ -112,19 +113,30 @@ def optimize_geometry():
         except:
             return 1e10
     
-    # Use differential evolution with more iterations and larger population
-    result = differential_evolution(
-        objective, 
-        bounds, 
-        popsize=SIM_POPSIZE,
-        mutation=(0.5, 1.0),
-        recombination=0.7,
-        maxiter=SIM_MAXITER,
-        tol=SIM_TOL,
-        seed=RANDOM_SEED,
-        polish=True
-    )
-    return result.x
+    # Create progress bar
+    pbar = tqdm(total=SIM_MAXITER, desc="Optimizing geometry")
+    
+    def callback(xk, convergence):
+        """Callback function to update progress bar"""
+        pbar.update(1)
+    
+    try:
+        # Use differential evolution with callback for progress tracking
+        result = differential_evolution(
+            objective, 
+            bounds, 
+            popsize=SIM_POPSIZE,
+            mutation=(0.5, 1.0),
+            recombination=0.7,
+            maxiter=SIM_MAXITER,
+            tol=SIM_TOL,
+            seed=RANDOM_SEED,
+            polish=True,
+            callback=callback
+        )
+        return result.x
+    finally:
+        pbar.close()
 
 def calculate_drag(radius, length, mach):
     """Calculate approximate drag coefficient."""
