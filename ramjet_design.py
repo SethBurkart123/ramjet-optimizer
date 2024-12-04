@@ -5,6 +5,7 @@ from scipy.optimize import differential_evolution
 from tqdm.auto import tqdm
 import warnings
 warnings.filterwarnings('ignore')
+import ezdxf
 
 # Simulation control parameters
 SIM_POPSIZE = 30        # Population size for optimization
@@ -419,6 +420,44 @@ def calculate_performance():
         'mass_flow': mdot
     }
 
+def export_dxf_profile():
+    """Export the ramjet profile as a DXF file for CAD import."""
+    # Get geometry data
+    spike_x, spike_y, _, _, _, params = generate_spike_profile()
+    flow_x, flow_upper, _ = generate_flow_path()
+    
+    # Create a new DXF document
+    doc = ezdxf.new('R2010')  # AutoCAD 2010 format for better compatibility
+    msp = doc.modelspace()
+    
+    # Convert coordinates to cm and create point lists
+    # Spike profile points
+    spike_points = [(x/10, y/10) for x, y in zip(spike_x, spike_y)]
+    
+    # Flow path points
+    flow_points = [(x/10, y/10) for x, y in zip(flow_x, flow_upper)]
+    
+    # Create splines in the DXF file
+    # Add spike profile
+    msp.add_spline(spike_points)
+    
+    # Add flow path
+    msp.add_spline(flow_points)
+    
+    # Add centerline
+    msp.add_line((0, 0), (total_length/10, 0))
+    
+    # Save the DXF file
+    doc.saveas('ramjet_profile.dxf')
+    
+    print("\nProfile exported to 'ramjet_profile.dxf'")
+    print("To use in Fusion 360:")
+    print("1. Create a new sketch on the XY plane")
+    print("2. Insert > Insert DXF")
+    print("3. Select ramjet_profile.dxf")
+    print("4. Use the Revolve command around the X axis")
+    print("5. Add wall thickness as needed")
+
 if __name__ == "__main__":
     plot_ramjet()
     performance = calculate_performance()
@@ -427,3 +466,6 @@ if __name__ == "__main__":
     print(f"Specific Impulse: {performance['specific_impulse']:.1f} s")
     print(f"Thermal Efficiency: {performance['thermal_efficiency']*100:.1f}%")
     print(f"Pressure Recovery: {performance['pressure_ratio']:.3f}")
+    
+    # Export the DXF profile
+    export_dxf_profile()
