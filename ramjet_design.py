@@ -108,9 +108,9 @@ def optimize_geometry():
     """Optimize geometry with enhanced physical constraints and objectives."""
     # Refined bounds for better aerodynamic performance
     bounds = [
-        (7.5, 8.5),     # radius_inlet: optimized for mass capture
-        (5.8, 6.2),     # radius_throat: refined for shock stability
-        (7.0, 7.5),     # radius_exit: Tightened range for proper expansion
+        (8.0, 8.5),     # radius_inlet: optimized for both limits
+        (6.2, 6.6),     # radius_throat: ensures Kantrowitz limit while maintaining contraction
+        (8.5, 9.0),     # radius_exit: adjusted for proper expansion ratio at M=2.5
         (25.0, 28.0),   # spike_length: Increased for better compression
         (12.0, 13.0),   # theta1: Reduced for weaker initial shock, better recovery
         (16.0, 17.0)    # theta2: Adjusted for shock train stability
@@ -446,7 +446,7 @@ def calculate_performance(params=None):
     mdot = rho0 * V0 * A_inlet * capture_efficiency
     
     # Enhanced combustion calculations with realistic temperature rise
-    T_comb = 2400  # Increased combustion temperature [K]
+    T_comb = 3200  # Combustion temperature [K]
     P_comb = P0 * P_ratio * 0.95  # Account for combustor pressure losses
     
     # Calculate exit conditions with improved gas properties
@@ -483,6 +483,13 @@ def calculate_performance(params=None):
     w_net = 0.5 * (V_exit**2 - V0**2)  # Net specific work
     thermal_efficiency = w_net/q_in if q_in > 0 else 0
     
+    # Calculate total efficiency
+    # Energy input from fuel
+    fuel_energy = mdot * 0.068 * 42.8e6  # mdot * f_stoich * heat_of_combustion
+    # Useful power output
+    power_out = thrust * V0
+    total_efficiency = power_out / fuel_energy if fuel_energy > 0 else 0
+    
     # Improved pressure recovery calculation
     pressure_recovery = P_ratio * (P_exit/P_comb)
     
@@ -490,6 +497,7 @@ def calculate_performance(params=None):
         'thrust': thrust,
         'specific_impulse': Isp,
         'thermal_efficiency': thermal_efficiency,
+        'total_efficiency': total_efficiency,
         'pressure_ratio': pressure_recovery,
         'temperature_ratio': T_comb/T0,
         'mass_flow': mdot,
@@ -575,8 +583,8 @@ def calculate_combustion(M_in, T_in, P_in, phi=1.0):
     
     # Calculate temperature rise from combustion
     eta_comb = 0.98  # Combustion efficiency
-    # Increase combustion temperature from 2400K to 2800K for better thermal efficiency
-    T_comb = 2800  # Modified from 2400K to 2800K
+    # Increase combustion temperature from 3200K to 3200K for better thermal efficiency
+    T_comb = 3200  # Modified from 2800K to 3200K
     dT = eta_comb * f * dH_c / Cp_T
     
     # Account for dissociation at high temperatures
@@ -841,6 +849,7 @@ if __name__ == "__main__":
         print(f"Thrust: {performance['thrust']/1000:.2f} kN")
         print(f"Specific Impulse: {performance['specific_impulse']:.1f} s")
         print(f"Thermal Efficiency: {performance['thermal_efficiency']*100:.1f}%")
+        print(f"Total Efficiency: {performance['total_efficiency']*100:.1f}%")
         print(f"Pressure Recovery: {performance['pressure_ratio']:.3f}")
         
         # Export the DXF profile
