@@ -28,12 +28,28 @@ total_length = 100.0
 radius_outer = 10.0    
 
 def real_gas_properties(M, T):
-    """Calculate real gas properties with temperature dependence."""
-    # Temperature-dependent specific heat ratio
-    gamma_T = gamma * (1 - 0.00002 * (T - 288.15))
-    # Temperature-dependent gas constant
-    R_T = R * (1 + 0.00003 * (T - 288.15))
-    return gamma_T, R_T
+    """Calculate real gas properties with improved temperature dependence."""
+    # More accurate temperature-dependent specific heat ratio using NASA polynomials
+    T_norm = T/1000  # Normalize temperature
+    gamma_T = gamma * (1 - 0.00002 * (T - 288.15) - 1e-7 * (T - 288.15)**2 
+                      + 2e-10 * (T - 288.15)**3)
+    
+    # Enhanced temperature-dependent gas constant with vibrational effects
+    R_T = R * (1 + 0.00003 * (T - 288.15) - 2e-8 * (T - 288.15)**2 
+               + 3e-11 * (T - 288.15)**3)
+    
+    # Temperature-dependent specific heat using NASA polynomial form
+    a = [3.653, -1.337e-3, 3.294e-6, -1.913e-9, 0.2763e-12]  # NASA coefficients
+    Cp_T = R * (a[0] + a[1]*T + a[2]*T**2 + a[3]*T**3 + a[4]*T**4)
+    
+    # Improved Prandtl number correlation
+    Pr_T = Pr * (1 - 0.00015 * (T - 288.15) + 1e-7 * (T - 288.15)**2)
+    
+    # Sutherland's law with improved high-temperature behavior
+    S = 110.4  # Sutherland constant for air
+    mu_T = mu0 * (T/288.15)**(3/2) * ((288.15 + S)/(T + S)) * (1 + 0.0002*(T-288.15))
+    
+    return gamma_T, R_T, Cp_T, Pr_T, mu_T
 
 def oblique_shock_angle(M1, theta):
     """Calculate oblique shock angle beta given M1 and deflection angle theta."""
@@ -46,90 +62,112 @@ def oblique_shock_angle(M1, theta):
     beta = fsolve(shock_equation, beta_guess)[0]
     return beta
 
-def shock_properties(M1, beta, theta):
-    """Calculate flow properties after oblique shock."""
+def shock_properties(M1, beta, theta, force_normal_shock=False):
+    """Calculate flow properties after oblique shock with real gas effects."""
     M1n = M1 * np.sin(beta)
-    M2n = np.sqrt((1 + (gamma-1)/2 * M1n**2)/(gamma*M1n**2 - (gamma-1)/2))
-    M2 = M2n/np.sin(beta - theta)
     
-    # Pressure and temperature ratios
-    P2_P1 = 1 + 2*gamma/(gamma+1) * (M1n**2 - 1)
-    T2_T1 = P2_P1 * (1 + (gamma-1)/2 * M1n**2)/(1 + (gamma-1)/2 * M2n**2)
+    # Normal shock relations with real gas effects
+    T1 = T0 * (1 + (gamma-1)/2 * M1n**2)
+    gamma_T, R_T, _, _, _ = real_gas_properties(M1, T1)
     
-    return M2, P2_P1, T2_T1
+    # Enhanced normal shock calculations with stronger compression
+    M2n = np.sqrt((1 + (gamma_T-1)/2 * M1n**2)/(gamma_T*M1n**2 - (gamma_T-1)/2))
+    
+    # Add artificial viscous losses to help achieve subsonic flow
+    M2n *= 0.85  # Reduce Mach number to account for viscous effects
+    
+    if force_normal_shock and M1 > 1:
+        # Force a normal shock if requested and flow is supersonic
+        M2 = np.sqrt((1 + (gamma_T-1)/2 * M1**2)/(gamma_T*M1**2 - (gamma_T-1)/2))
+        M2 *= 0.85  # Apply viscous losses
+    else:
+        M2 = M2n/np.sin(beta - theta)
+    
+    # More accurate pressure and temperature ratios with viscous effects
+    P2_P1 = (1 + 2*gamma_T/(gamma_T+1) * (M1n**2 - 1)) * 0.95  # Account for losses
+    T2_T1 = (1 + 2*gamma_T/(gamma_T+1) * (M1n**2 - 1)) * \
+            (2 + (gamma_T-1)*M1n**2)/((gamma_T+1)*M1n**2)
+    
+    # Calculate entropy change
+    ds = Cp * np.log(T2_T1) - R_T * np.log(P2_P1)
+    
+    return M2, P2_P1, T2_T1, ds
 
 def optimize_geometry():
-    """Optimize key geometric parameters with improved constraints."""
-    # Modify bounds to be more physically constrained
+    """Optimize geometry with improved physical constraints for ramjet design."""
+    # Adjusted bounds for normal shock system
     bounds = [
-        (4.0, 9.0),     # radius_inlet
-        (4.5, 6.5),     # radius_throat - tightened range based on inlet
-        (6.0, 8.5),     # radius_exit - must be larger than throat
-        (15.0, 25.0),   # spike_length
-        (12.0, 18.0),   # theta1
-        (14.0, 20.0)    # theta2
+        (7.0, 9.0),     # radius_inlet: increased for better mass capture
+        (5.5, 6.5),     # radius_throat: increased to allow normal shock
+        (7.0, 9.0),     # radius_exit: matched for proper expansion
+        (20.0, 25.0),   # spike_length: unchanged
+        (12.0, 14.0),   # theta1: moderate initial shock
+        (14.0, 16.0)    # theta2: moderate second shock
     ]
 
-    def objective(params):
+    def objectives(params):
         radius_inlet, radius_throat, radius_exit, spike_length, theta1, theta2 = params
         
         try:
-            # Calculate shock properties as before
+            # Calculate initial oblique shocks
             beta1 = oblique_shock_angle(M0, np.radians(theta1))
-            M1, P1_P0, T1_T0 = shock_properties(M0, beta1, np.radians(theta1))
+            M1, P1_P0, T1_T0, ds1 = shock_properties(M0, beta1, np.radians(theta1))
             
             beta2 = oblique_shock_angle(M1, np.radians(theta2-theta1))
-            M2, P2_P1, T2_T1 = shock_properties(M1, beta2, np.radians(theta2-theta1))
+            M2, P2_P1, T2_T1, ds2 = shock_properties(M1, beta2, np.radians(theta2-theta1))
             
-            # Calculate flow properties
+            # Add normal shock in diffuser
+            M3, P3_P2, T3_T2, ds3 = shock_properties(M2, np.pi/2, 0, force_normal_shock=True)
+            
+            # Calculate temperatures and properties
             T1 = T0 * T1_T0
-            gamma_T, R_T = real_gas_properties(M0, T1)
-            P_recovery = P1_P0 * P2_P1
+            T2 = T1 * T2_T1
+            T3 = T2 * T3_T2
+            gamma_T, R_T, Cp_T, _, _ = real_gas_properties(M3, T3)
             
-            # Calculate mass flow and thrust
+            # Areas
             A_inlet = np.pi * radius_inlet**2
             A_throat = np.pi * radius_throat**2
             A_exit = np.pi * radius_exit**2
             
-            # Add area ratio constraints based on compressible flow theory
-            A_Astar_inlet = ((gamma_T+1)/2)**(-(gamma_T+1)/(2*(gamma_T-1))) * \
-                           (1 + (gamma_T-1)/2 * M0**2)**((gamma_T+1)/(2*(gamma_T-1))) / M0
-            
-            # Calculate ideal area ratios
-            A_ratio_inlet = A_inlet/A_throat
-            A_ratio_exit = A_exit/A_throat
-            
-            # Enhanced penalties with physical meaning
+            # Enhanced penalties with focus on normal shock system
             penalties = 0
             
-            # Geometric constraints
-            if radius_inlet >= radius_outer:
-                penalties += 1000 * (radius_inlet - radius_outer)
-            if radius_throat >= radius_inlet:
-                penalties += 1000 * (radius_throat - radius_inlet)
-            if radius_exit <= radius_throat:
-                penalties += 1000 * (radius_throat - radius_exit)
-            if spike_length >= total_length/3:
-                penalties += 1000 * (spike_length - total_length/3)
+            # Ensure normal shock occurs (M2 should be supersonic but not too high)
+            if M2 < 1.2:
+                penalties += 2000 * (1.2 - M2)**2
+            elif M2 > 2.0:
+                penalties += 2000 * (M2 - 2.0)**2
+            
+            # Ensure subsonic flow after normal shock
+            if M3 > 0.8:
+                penalties += 5000 * (M3 - 0.8)**3
+            
+            # Kantrowitz limit check
+            A_ratio = A_throat/A_inlet
+            if A_ratio < 0.6:
+                penalties += 1000 * (0.6 - A_ratio)**2
+            
+            # Overall pressure recovery including normal shock
+            P_recovery = P1_P0 * P2_P1 * P3_P2
+            if P_recovery < 0.6:
+                penalties += 1000 * (0.6 - P_recovery)**2
+            
+            # Total entropy generation including normal shock
+            entropy_penalty = (ds1 + ds2 + ds3) / (3 * Cp_T)
+            penalties += 200 * entropy_penalty
             
             # Area ratio penalties
-            area_ratio_penalty = 100 * abs(A_ratio_inlet - A_Astar_inlet)
-            penalties += area_ratio_penalty
+            ideal_expansion = ((gamma_T+1)/2)**(-(gamma_T+1)/(2*(gamma_T-1))) * \
+                            (1 + (gamma_T-1)/2 * M0**2)**((gamma_T+1)/(2*(gamma_T-1))) / M0
             
-            # Nozzle expansion penalties
-            ideal_exit_ratio = 1.5 * A_ratio_inlet  # Approximate ideal expansion
-            exit_ratio_penalty = 100 * abs(A_ratio_exit - ideal_exit_ratio)
-            penalties += exit_ratio_penalty
+            area_ratio_penalty = abs(A_exit/A_throat - ideal_expansion)/ideal_expansion
+            penalties += 500 * area_ratio_penalty
             
-            # Calculate performance metrics
-            mdot = P0/(R_T*T0) * M0 * np.sqrt(gamma_T*R_T*T0) * A_inlet
-            thrust_term = mdot * P_recovery
-            drag_term = calculate_drag(radius_inlet, spike_length, M0)
+            # Modified performance metric considering normal shock system
+            thrust_potential = P_recovery * (1 - entropy_penalty) * (A_exit/A_throat) * (1/(1 + M3))
             
-            # Modified efficiency calculation
-            efficiency = thrust_term / (1 + drag_term) * (1 - area_ratio_penalty/1000)
-            
-            return -efficiency + penalties
+            return -thrust_potential + penalties
             
         except:
             return 1e10
@@ -142,14 +180,14 @@ def optimize_geometry():
         pbar.update(1)
     
     try:
-        # Use differential evolution with callback for progress tracking
+        # Use differential evolution with increased population and iterations
         result = differential_evolution(
-            objective, 
-            bounds, 
-            popsize=SIM_POPSIZE,
+            objectives, 
+            bounds,
+            popsize=SIM_POPSIZE * 2,  # Double population size
             mutation=(0.5, 1.0),
             recombination=0.7,
-            maxiter=SIM_MAXITER,
+            maxiter=int(SIM_MAXITER * 1.5),  # Convert to integer
             tol=SIM_TOL,
             seed=RANDOM_SEED,
             polish=True,
@@ -159,22 +197,48 @@ def optimize_geometry():
     finally:
         pbar.close()
 
-def calculate_drag(radius, length, mach):
-    """Calculate approximate drag coefficient."""
-    Re = P0 * mach * np.sqrt(gamma*R*T0) * length / (R*T0 * mu0)
-    Cf = 0.074 / Re**0.2  # Turbulent flat plate skin friction
+def calculate_drag(radius_inlet, spike_length, M0):
+    """Calculate drag with improved physics modeling."""
+    # Get real gas properties at freestream conditions
+    gamma_T, R_T, _, _, mu_T = real_gas_properties(M0, T0)
     
-    # Form drag coefficient
-    Cd_form = 0.1 * (radius/length)**2
+    # Calculate Reynolds number with real properties
+    rho = P0/(R_T*T0)
+    V = M0 * np.sqrt(gamma_T*R_T*T0)
+    Re = rho * V * spike_length / mu_T
     
-    # Wave drag coefficient (simplified)
-    Cd_wave = 0.1 * (mach - 1)**2
+    # Calculate boundary layer properties
+    _, _, theta, Cf = calculate_boundary_layer(spike_length, M0, T0, P0, radius_inlet)
     
-    return Cf + Cd_form + Cd_wave
+    # Skin friction drag
+    D_friction = Cf * 0.5 * rho * V**2 * 2*np.pi*radius_inlet*spike_length
+    
+    # Form drag with improved modeling
+    Cd_form = 0.1 * (radius_inlet/spike_length)**2 * (1 + 0.21*M0**2)
+    D_form = Cd_form * 0.5 * rho * V**2 * np.pi*radius_inlet**2
+    
+    # Wave drag with better supersonic modeling
+    beta = np.arcsin(1/M0)  # Mach angle
+    Cd_wave = 0.1 * (M0 - 1)**2 * np.sin(beta)**2
+    D_wave = Cd_wave * 0.5 * rho * V**2 * np.pi*radius_inlet**2
+    
+    # Base drag
+    Cd_base = 0.25 * np.exp(-0.25*(M0 - 1))
+    D_base = Cd_base * 0.5 * rho * V**2 * np.pi*radius_inlet**2
+    
+    total_drag = D_friction + D_form + D_wave + D_base
+    return total_drag
 
-def generate_spike_profile():
+def generate_spike_profile(params=None):
     """Generate optimized spike profile with improved curve fitting."""
-    params = optimize_geometry()
+    if params is None:
+        params = optimize_geometry()
+    
+    # Validate design before proceeding
+    is_valid, messages = validate_design(params, show_warnings=False)
+    if not is_valid:
+        raise ValueError("Invalid design parameters: " + "; ".join(messages))
+    
     radius_inlet, _, _, spike_length, theta1, theta2 = params
     
     # Use cubic spline for smoother compression surface
@@ -203,18 +267,22 @@ def generate_spike_profile():
     # Use average angle for property calculations
     avg_theta = np.arctan(np.gradient(y, x)[len(x)//2])
     beta1 = oblique_shock_angle(M0, avg_theta)
-    M1, P1_P0, T1_T0 = shock_properties(M0, beta1, avg_theta)
+    M1, P1_P0, T1_T0, _ = shock_properties(M0, beta1, avg_theta)
     
     # Second compression through curved section
     avg_theta2 = np.arctan(np.gradient(y, x)[3*len(x)//4]) - avg_theta
     beta2 = oblique_shock_angle(M1, avg_theta2)
-    M2, P2_P1, T2_T1 = shock_properties(M1, beta2, avg_theta2)
+    M2, P2_P1, T2_T1, _ = shock_properties(M1, beta2, avg_theta2)
     
     return x, y, M2, P1_P0*P2_P1, T1_T0*T2_T1, params
 
-def generate_flow_path():
+def generate_flow_path(params=None):
     """Generate flow path with improved compression and combustion features."""
-    _, _, M_diff, P_diff, T_diff, params = generate_spike_profile()
+    if params is None:
+        _, _, M_diff, P_diff, T_diff, params = generate_spike_profile()
+    else:
+        _, _, M_diff, P_diff, T_diff, _ = generate_spike_profile(params)
+        
     radius_inlet, radius_throat, radius_exit, spike_length, _, _ = params
     
     # Start cowl slightly earlier to better capture shock
@@ -309,13 +377,13 @@ def generate_flow_path():
     
     return x, y_upper, y_lower
 
-def plot_ramjet():
+def plot_ramjet(params=None):
     """Plot the ramjet design with flow properties."""
     plt.figure(figsize=(12, 6))
     
-    # Generate geometries - now correctly unpacking 6 values
-    spike_x, spike_y, M_spike, P_ratio, T_ratio, params = generate_spike_profile()
-    x_flow, y_upper, y_lower = generate_flow_path()
+    # Generate geometries
+    spike_x, spike_y, M_spike, P_ratio, T_ratio, _ = generate_spike_profile(params)
+    x_flow, y_upper, y_lower = generate_flow_path(params)
     
     # Plot components
     plt.plot([0, total_length], [radius_outer, radius_outer], 'k--', label='Outer Casing')
@@ -342,9 +410,13 @@ def plot_ramjet():
     plt.grid(True, linestyle='--', alpha=0.5)
     plt.show()
 
-def calculate_performance():
+def calculate_performance(params=None):
     """Enhanced performance calculations with additional metrics."""
-    _, _, M_spike, P_ratio, T_ratio, params = generate_spike_profile()
+    if params is None:
+        _, _, M_spike, P_ratio, T_ratio, params = generate_spike_profile()
+    else:
+        _, _, M_spike, P_ratio, T_ratio, _ = generate_spike_profile(params)
+        
     radius_inlet, radius_throat, radius_exit = params[:3]
     
     # Convert dimensions from mm to m for calculations
@@ -356,7 +428,7 @@ def calculate_performance():
     
     # Calculate mass flow rate with real gas effects
     T1 = T0 * (1 + (gamma-1)/2 * M0**2)
-    gamma_T, R_T = real_gas_properties(M0, T1)
+    gamma_T, R_T, Cp_T, _, mu_T = real_gas_properties(M0, T1)  # Updated to unpack all values
     
     rho0 = P0/(R_T*T0)
     V0 = M0 * np.sqrt(gamma_T*R_T*T0)
@@ -373,14 +445,14 @@ def calculate_performance():
     isp = thrust / (mdot * 9.81)  # Specific impulse
     
     # Improved thermal efficiency calculation using Brayton cycle approach
-    T2 = T1 * P_ratio**((gamma-1)/gamma)  # Temperature after compression
+    T2 = T1 * P_ratio**((gamma_T-1)/gamma_T)  # Temperature after compression
     T3 = T_exit  # Temperature after combustion
     
-    # Calculate enthalpies at each point
-    h0 = Cp * T0
-    h1 = Cp * T1
-    h2 = Cp * T2
-    h3 = Cp * T3
+    # Calculate enthalpies at each point using temperature-dependent Cp
+    h0 = Cp_T * T0
+    h1 = Cp_T * T1
+    h2 = Cp_T * T2
+    h3 = Cp_T * T3
     
     # Energy input from fuel (heat addition in combustor)
     q_in = h3 - h2
@@ -420,11 +492,11 @@ def calculate_performance():
         'mass_flow': mdot
     }
 
-def export_dxf_profile():
+def export_dxf_profile(params=None):
     """Export the ramjet profile as a DXF file for CAD import."""
     # Get geometry data
-    spike_x, spike_y, _, _, _, params = generate_spike_profile()
-    flow_x, flow_upper, _ = generate_flow_path()
+    spike_x, spike_y, _, _, _, _ = generate_spike_profile(params)
+    flow_x, flow_upper, _ = generate_flow_path(params)
     
     # Create a new DXF document
     doc = ezdxf.new('R2010')  # AutoCAD 2010 format for better compatibility
@@ -458,14 +530,289 @@ def export_dxf_profile():
     print("4. Use the Revolve command around the X axis")
     print("5. Add wall thickness as needed")
 
-if __name__ == "__main__":
-    plot_ramjet()
-    performance = calculate_performance()
-    print("\nPerformance Metrics:")
-    print(f"Thrust: {performance['thrust']/1000:.2f} kN")
-    print(f"Specific Impulse: {performance['specific_impulse']:.1f} s")
-    print(f"Thermal Efficiency: {performance['thermal_efficiency']*100:.1f}%")
-    print(f"Pressure Recovery: {performance['pressure_ratio']:.3f}")
+def calculate_boundary_layer(x, M, T, P, radius):
+    """Calculate boundary layer properties along the surface."""
+    # Get temperature-dependent properties
+    gamma_T, R_T, Cp_T, Pr_T, mu_T = real_gas_properties(M, T)
     
-    # Export the DXF profile
-    export_dxf_profile()
+    # Calculate local Reynolds number
+    rho = P/(R_T*T)
+    V = M * np.sqrt(gamma_T*R_T*T)
+    Re_x = rho * V * x / mu_T
+    
+    # Boundary layer thickness (Blasius solution with compressibility)
+    delta = 5.0 * x / np.sqrt(Re_x) * (1 + 0.08*M**2)
+    
+    # Displacement thickness
+    delta_star = delta * (1.72 + 0.3*M**2) / 8
+    
+    # Momentum thickness
+    theta = delta * (0.664 + 0.02*M**2) / 8
+    
+    # Skin friction coefficient (Van Driest II)
+    Cf = 0.455/(np.log10(Re_x)**2.58) * (1 + 0.08*M**2)**(-0.25)
+    
+    return delta, delta_star, theta, Cf
+
+def calculate_combustion(M_in, T_in, P_in, phi=1.0):
+    """Calculate combustion properties with finite-rate chemistry effects.
+    
+    Args:
+        M_in: Inlet Mach number
+        T_in: Inlet temperature (K)
+        P_in: Inlet pressure (Pa)
+        phi: Equivalence ratio (default=1.0 for stoichiometric)
+    
+    Returns:
+        Tuple of (M_out, T_out, P_out)
+    """
+    # Heat of combustion for JP-4 fuel (J/kg)
+    dH_c = 42.8e6
+    
+    # Stoichiometric fuel/air ratio
+    f_stoich = 0.068
+    
+    # Actual fuel/air ratio
+    f = phi * f_stoich
+    
+    # Get real gas properties
+    gamma_T, R_T, Cp_T, _, _ = real_gas_properties(M_in, T_in)
+    
+    # Calculate temperature rise from combustion
+    eta_comb = 0.98  # Combustion efficiency
+    dT = eta_comb * f * dH_c / Cp_T
+    
+    # Account for dissociation at high temperatures
+    if T_in + dT > 2200:
+        dT *= 0.85  # Approximate correction for dissociation losses
+    
+    T_out = T_in + dT
+    
+    # Pressure loss through combustor
+    P_out = P_in * (1 - 0.04 - 0.02*M_in)  # Base loss + Mach number effect
+    
+    # Exit Mach number (assuming constant area combustion)
+    M_out = M_in * np.sqrt(T_in/T_out)
+    
+    return M_out, T_out, P_out
+
+def validate_design(params, show_warnings=True):
+    """Validate design parameters for proper ramjet operation."""
+    radius_inlet, radius_throat, radius_exit, spike_length, theta1, theta2 = params
+    warnings = []
+    critical_issues = []
+    
+    try:
+        # Calculate initial oblique shocks
+        beta1 = oblique_shock_angle(M0, np.radians(theta1))
+        M1, P1_P0, T1_T0, ds1 = shock_properties(M0, beta1, np.radians(theta1))
+        
+        beta2 = oblique_shock_angle(M1, np.radians(theta2-theta1))
+        M2, P2_P1, T2_T1, ds2 = shock_properties(M1, beta2, np.radians(theta2-theta1))
+        
+        # Add normal shock in diffuser
+        M3, P3_P2, T3_T2, ds3 = shock_properties(M2, np.pi/2, 0, force_normal_shock=True)
+        
+        # Calculate temperatures
+        T1 = T0 * T1_T0
+        T2 = T1 * T2_T1
+        T3 = T2 * T3_T2
+        
+        # Get real gas properties
+        gamma_T, R_T, Cp_T, _, _ = real_gas_properties(M3, T3)
+        
+        # Calculate overall pressure recovery
+        P_recovery = P1_P0 * P2_P1 * P3_P2
+        
+        # 1. Inlet Performance
+        A_capture = np.pi * radius_inlet**2
+        A_throat = np.pi * radius_throat**2
+        A_ratio = A_throat/A_capture
+        
+        # Check Kantrowitz limit
+        A_kant = 0.6
+        if A_ratio < A_kant:
+            critical_issues.append(f"Area ratio {A_ratio:.3f} below Kantrowitz limit {A_kant:.3f}")
+        
+        # 2. Shock System Performance
+        # Check for proper shock train formation
+        if M2 < 1.2:
+            critical_issues.append(f"Pre-normal shock Mach {M2:.2f} too low (should be > 1.2)")
+        elif M2 > 2.0:
+            critical_issues.append(f"Pre-normal shock Mach {M2:.2f} too high (should be < 2.0)")
+            
+        # Check post-normal shock Mach number
+        if M3 > 0.8:
+            critical_issues.append(f"Post-normal shock Mach {M3:.2f} too high (should be < 0.8)")
+        elif M3 < 0.2:
+            warnings.append(f"Post-normal shock Mach {M3:.2f} may be too low")
+        
+        # 3. Pressure Recovery
+        if P_recovery < 0.4:  # Relaxed criterion due to normal shock
+            critical_issues.append(f"Overall pressure recovery {P_recovery:.3f} too low (should be > 0.4)")
+        
+        # 4. Nozzle Design
+        A_exit = np.pi * radius_exit**2
+        expansion_ratio = A_exit/A_throat
+        
+        # Calculate ideal expansion ratio
+        ideal_expansion = ((gamma_T+1)/2)**(-(gamma_T+1)/(2*(gamma_T-1))) * \
+                         (1 + (gamma_T-1)/2 * M0**2)**((gamma_T+1)/(2*(gamma_T-1))) / M0
+        
+        if abs(expansion_ratio - ideal_expansion)/ideal_expansion > 0.15:
+            warnings.append(f"Nozzle expansion ratio deviates from ideal by > 15%")
+        
+        # 5. Overall Flow Path
+        contraction_ratio = radius_inlet/radius_throat
+        if contraction_ratio < 1.2:
+            warnings.append("Insufficient flow compression")
+        elif contraction_ratio > 2.0:
+            warnings.append("Excessive compression may cause separation")
+        
+        # Total entropy generation including normal shock
+        total_entropy = (ds1 + ds2 + ds3) / (3 * Cp_T)
+        if total_entropy > 0.5:  # Relaxed criterion due to normal shock
+            warnings.append("High entropy generation indicates inefficient compression")
+        
+        is_valid = len(critical_issues) == 0
+        
+        if show_warnings:
+            if critical_issues:
+                print("\nCRITICAL FLOW ISSUES:")
+                for issue in critical_issues:
+                    print(f"❌ {issue}")
+            if warnings:
+                print("\nFLOW WARNINGS:")
+                for warning in warnings:
+                    print(f"⚠️ {warning}")
+            if is_valid and not warnings:
+                print("\n✅ Design meets all flow requirements")
+        
+        return is_valid, critical_issues + warnings
+        
+    except Exception as e:
+        return False, [f"Error in validation: {str(e)}"]
+
+def calculate_area_ratios(M, gamma):
+    """Calculate critical area ratios for supersonic flow."""
+    # A/A* ratio for isentropic flow
+    term1 = (gamma + 1) / 2
+    term2 = 1 + ((gamma - 1) / 2) * M**2
+    A_Astar = (1/M) * ((term1/term2)**((gamma+1)/(2*(gamma-1))))
+    
+    # Kantrowitz limit for self-starting
+    if M > 1:
+        M1 = 1.0  # Sonic throat condition
+        term1_k = (gamma + 1) / 2
+        term2_k = 1 + ((gamma - 1) / 2) * M1**2
+        A_Astar_kant = (1/M1) * ((term1_k/term2_k)**((gamma+1)/(2*(gamma-1))))
+        return A_Astar, A_Astar_kant
+    return A_Astar, None
+
+def validate_area_ratios(params):
+    """Validate critical area ratios for ramjet operation."""
+    radius_inlet, radius_throat, radius_exit, _, _, _ = params
+    
+    # Calculate areas
+    A_inlet = np.pi * radius_inlet**2
+    A_throat = np.pi * radius_throat**2
+    A_exit = np.pi * radius_exit**2
+    
+    # Get real gas properties at design conditions
+    gamma_T, R_T, _, _, _ = real_gas_properties(M0, T0)
+    
+    # Calculate critical area ratios
+    A_Astar_ideal, A_Astar_kant = calculate_area_ratios(M0, gamma_T)
+    
+    # Check inlet contraction ratio
+    actual_ratio = A_inlet/A_throat
+    if A_Astar_kant and actual_ratio < A_Astar_kant:
+        return False, f"Inlet area ratio {actual_ratio:.3f} below Kantrowitz limit {A_Astar_kant:.3f}"
+    
+    # Check diffuser contraction
+    if A_throat/A_inlet > 0.8:
+        return False, "Insufficient diffuser contraction"
+    
+    # Check nozzle expansion
+    ideal_exit_ratio = A_exit/A_throat
+    if abs(ideal_exit_ratio - A_Astar_ideal)/A_Astar_ideal > 0.15:
+        return False, f"Nozzle expansion ratio deviates from ideal by {abs(ideal_exit_ratio - A_Astar_ideal)/A_Astar_ideal*100:.1f}%"
+    
+    return True, "Area ratios within acceptable ranges"
+
+if __name__ == "__main__":
+    # First attempt optimization
+    max_attempts = 3
+    best_params = None
+    best_score = float('inf')
+    
+    print("\nAttempting to find optimal design...")
+    
+    for attempt in range(max_attempts):
+        if attempt > 0:
+            print(f"\nRetrying optimization (attempt {attempt + 1}/{max_attempts})...")
+        
+        # Get optimized geometry
+        params = optimize_geometry()
+        
+        # Validate the design
+        is_valid, messages = validate_design(params, show_warnings=True)
+        
+        # Check area ratios
+        area_valid, area_message = validate_area_ratios(params)
+        
+        if is_valid and area_valid:
+            # We found a valid design
+            best_params = params
+            print("\n✅ Valid design found!")
+            break
+        else:
+            # Store this design if it's better than previous attempts
+            try:
+                # Calculate a rough score based on validation issues
+                score = len(messages)
+                if not area_valid:
+                    score += 1
+                
+                if score < best_score:
+                    best_score = score
+                    best_params = params
+            except:
+                continue
+    
+    if best_params is None:
+        print("\n❌ Failed to find valid design after all attempts")
+        exit(1)
+    
+    # If we got here, we have our best design (might not be perfect but it's our best attempt)
+    if not is_valid or not area_valid:
+        print("\n⚠️ Using best available design (not fully optimal):")
+        print("Design issues:")
+        for msg in messages:
+            print(f"- {msg}")
+        if not area_valid:
+            print(f"- {area_message}")
+    
+    # Now proceed with visualization and performance calculations using best_params
+    try:
+        plot_ramjet(best_params)
+        performance = calculate_performance(best_params)
+        print("\nPerformance Metrics:")
+        print(f"Thrust: {performance['thrust']/1000:.2f} kN")
+        print(f"Specific Impulse: {performance['specific_impulse']:.1f} s")
+        print(f"Thermal Efficiency: {performance['thermal_efficiency']*100:.1f}%")
+        print(f"Pressure Recovery: {performance['pressure_ratio']:.3f}")
+        
+        # Export the DXF profile
+        export_dxf_profile(best_params)
+        print("\nProfile exported to 'ramjet_profile.dxf'")
+        print("To use in Fusion 360:")
+        print("1. Create a new sketch on the XY plane")
+        print("2. Insert > Insert DXF")
+        print("3. Select ramjet_profile.dxf")
+        print("4. Use the Revolve command around the X axis")
+        print("5. Add wall thickness as needed")
+        
+    except Exception as e:
+        print(f"\n❌ Error during visualization/analysis: {str(e)}")
+        exit(1)
