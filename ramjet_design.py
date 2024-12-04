@@ -105,74 +105,81 @@ def shock_properties(M1, beta, theta, force_normal_shock=False):
 
 def optimize_geometry():
     """Optimize geometry with enhanced physical constraints and objectives."""
-    # Refined bounds based on practical constraints
+    # Adjusted bounds for better nozzle expansion
     bounds = [
         (7.5, 8.5),     # radius_inlet: optimized for mass capture
         (5.8, 6.2),     # radius_throat: refined for shock stability
-        (7.5, 8.5),     # radius_exit: matched to inlet for proper expansion
+        (6.8, 7.8),     # radius_exit: Reduced to fix expansion ratio
         (22.0, 24.0),   # spike_length: optimized for shock positioning
         (12.5, 13.5),   # theta1: refined for optimal compression
         (14.5, 15.5)    # theta2: optimized for shock train
     ]
 
     def objectives(params):
+        """Enhanced objective function with better physics modeling."""
         radius_inlet, radius_throat, radius_exit, spike_length, theta1, theta2 = params
         
         try:
-            # Calculate shock system properties
+            # Calculate shock system
             beta1 = oblique_shock_angle(M0, np.radians(theta1))
             M1, P1_P0, T1_T0, ds1 = shock_properties(M0, beta1, np.radians(theta1))
             
             beta2 = oblique_shock_angle(M1, np.radians(theta2-theta1))
             M2, P2_P1, T2_T1, ds2 = shock_properties(M1, beta2, np.radians(theta2-theta1))
             
-            # Normal shock properties with enhanced modeling
+            # Normal shock with improved modeling
             M3, P3_P2, T3_T2, ds3 = shock_properties(M2, np.pi/2, 0, force_normal_shock=True)
             
-            # Calculate real gas properties
+            # Calculate temperatures with real gas effects
             T1 = T0 * T1_T0
             T2 = T1 * T2_T1
             T3 = T2 * T3_T2
             gamma_T, R_T, Cp_T, _, _ = real_gas_properties(M3, T3)
             
-            # Enhanced penalties focusing on practical constraints
+            # Enhanced penalties
             penalties = 0
             
-            # Ensure proper shock train formation
+            # Shock train constraints
             if M2 < 1.3:
-                penalties += 3000 * (1.3 - M2)**2
+                penalties += 4000 * (1.3 - M2)**2
             elif M2 > 1.8:
-                penalties += 3000 * (M2 - 1.8)**2
+                penalties += 4000 * (M2 - 1.8)**2
             
-            # Strict subsonic diffuser exit condition
-            if M3 > 0.7:
-                penalties += 8000 * (M3 - 0.7)**3
+            # Diffuser exit Mach number
+            if M3 > 0.65:  # Slightly lower target for better combustion
+                penalties += 10000 * (M3 - 0.65)**3
             
-            # Enhanced Kantrowitz limit check
+            # Improved Kantrowitz limit
             A_ratio = (radius_throat/radius_inlet)**2
-            A_kant = 0.65  # Refined based on experimental data
+            A_kant = 0.65
             if A_ratio < A_kant:
-                penalties += 2000 * (A_kant - A_ratio)**2
+                penalties += 3000 * (A_kant - A_ratio)**2
             
-            # Improved pressure recovery metric
+            # Enhanced pressure recovery target
             P_recovery = P1_P0 * P2_P1 * P3_P2
-            if P_recovery < 0.65:  # Increased threshold
-                penalties += 2000 * (0.65 - P_recovery)**2
+            if P_recovery < 0.70:  # Higher target
+                penalties += 3000 * (0.70 - P_recovery)**2
             
-            # Enhanced entropy generation penalty
-            entropy_penalty = (ds1 + ds2 + ds3) / (3 * Cp_T)
-            penalties += 300 * entropy_penalty
+            # Entropy generation with temperature weighting
+            entropy_penalty = (ds1 + ds2 + ds3) / (3 * Cp_T) * (T3/T0)
+            penalties += 400 * entropy_penalty
             
-            # Refined area ratio penalties
+            # Improved nozzle expansion ratio calculation
+            A_ratio_nozzle = (radius_exit/radius_throat)**2
+            M_design = 2.5  # Design exit Mach number
+            
+            # Calculate ideal expansion ratio for the design Mach number
             ideal_expansion = ((gamma_T+1)/2)**(-(gamma_T+1)/(2*(gamma_T-1))) * \
-                            (1 + (gamma_T-1)/2 * M0**2)**((gamma_T+1)/(2*(gamma_T-1))) / M0
+                            (1/M_design) * (1 + (gamma_T-1)/2 * M_design**2)**((gamma_T+1)/(2*(gamma_T-1)))
             
-            area_ratio_penalty = abs((radius_exit/radius_throat)**2 - ideal_expansion)/ideal_expansion
-            penalties += 800 * area_ratio_penalty
+            # More stringent penalty for expansion ratio deviation
+            expansion_error = abs(A_ratio_nozzle - ideal_expansion)/ideal_expansion
+            penalties += 2000 * expansion_error**2
             
             # Enhanced performance metric
-            thrust_potential = P_recovery * (1 - entropy_penalty) * \
-                             (radius_exit/radius_throat)**2 * (1/(1 + M3))
+            thrust_potential = (P_recovery * (1 - entropy_penalty) * 
+                              A_ratio_nozzle * (1/(1 + M3)) * 
+                              np.sqrt(T3/T0))
             
             return -thrust_potential + penalties
             
@@ -408,7 +415,7 @@ def plot_ramjet(params=None):
     plt.show()
 
 def calculate_performance(params=None):
-    """Enhanced performance calculations with additional metrics."""
+    """Enhanced performance calculations with improved thermodynamics."""
     if params is None:
         _, _, M_spike, P_ratio, T_ratio, params = generate_spike_profile()
     else:
@@ -417,76 +424,74 @@ def calculate_performance(params=None):
     radius_inlet, radius_throat, radius_exit = params[:3]
     
     # Convert dimensions from mm to m for calculations
-    radius_inlet = radius_inlet / 1000  # mm to m
-    radius_exit = radius_exit / 1000    # mm to m
+    radius_inlet = radius_inlet / 1000
+    radius_throat = radius_throat / 1000
+    radius_exit = radius_exit / 1000
     
     A_inlet = np.pi * radius_inlet**2
+    A_throat = np.pi * radius_throat**2
     A_exit = np.pi * radius_exit**2
     
-    # Calculate mass flow rate with real gas effects
+    # Calculate inlet conditions with real gas effects
     T1 = T0 * (1 + (gamma-1)/2 * M0**2)
-    gamma_T, R_T, Cp_T, _, mu_T = real_gas_properties(M0, T1)  # Updated to unpack all values
+    gamma_T, R_T, Cp_T, _, mu_T = real_gas_properties(M0, T1)
     
+    # Improved mass flow calculation with better capture efficiency
     rho0 = P0/(R_T*T0)
     V0 = M0 * np.sqrt(gamma_T*R_T*T0)
-    mdot = rho0 * V0 * A_inlet
+    capture_efficiency = 0.95  # Typical value for well-designed inlet
+    mdot = rho0 * V0 * A_inlet * capture_efficiency
     
-    # Enhanced thrust calculation
-    P_exit = P0  # Assume optimal expansion
-    T_exit = T0 * T_ratio
-    V_exit = 2.5 * np.sqrt(gamma_T*R_T*T_exit)
+    # Enhanced combustion calculations with realistic temperature rise
+    T_comb = 2400  # Increased combustion temperature [K]
+    P_comb = P0 * P_ratio * 0.95  # Account for combustor pressure losses
     
-    thrust = mdot * (V_exit - V0) + A_exit * (P_exit - P0)
+    # Calculate exit conditions with improved gas properties
+    gamma_e, R_e, Cp_e, _, _ = real_gas_properties(M0, T_comb)
     
-    # Calculate additional performance metrics
-    isp = thrust / (mdot * 9.81)  # Specific impulse
+    # Improved nozzle calculations with better expansion modeling
+    PR_crit = (2/(gamma_e + 1))**(gamma_e/(gamma_e-1))
     
-    # Improved thermal efficiency calculation using Brayton cycle approach
-    T2 = T1 * P_ratio**((gamma_T-1)/gamma_T)  # Temperature after compression
-    T3 = T_exit  # Temperature after combustion
+    # Calculate actual pressure ratio
+    PR = P_comb/P0
     
-    # Calculate enthalpies at each point using temperature-dependent Cp
-    h0 = Cp_T * T0
-    h1 = Cp_T * T1
-    h2 = Cp_T * T2
-    h3 = Cp_T * T3
+    if PR > PR_crit:
+        # Choked flow - calculate exit Mach number
+        M_exit = 2.5  # Design exit Mach number
+        # Calculate exit pressure for optimal expansion
+        P_exit = P_comb * (1 + (gamma_e-1)/2 * M_exit**2)**(-gamma_e/(gamma_e-1))
+    else:
+        M_exit = np.sqrt(2/(gamma_e-1) * (PR**((gamma_e-1)/gamma_e) - 1))
+        P_exit = P0  # Underexpanded nozzle
     
-    # Energy input from fuel (heat addition in combustor)
-    q_in = h3 - h2
+    # Calculate exit temperature and velocity
+    T_exit = T_comb/(1 + (gamma_e-1)/2 * M_exit**2)
+    V_exit = M_exit * np.sqrt(gamma_e*R_e*T_exit)
     
-    # Compression work (negative as work is done on the fluid)
-    w_comp = h1 - h0
+    # Enhanced thrust calculation with improved pressure thrust
+    thrust = mdot * (V_exit - V0) + (P_exit - P0) * A_exit
     
-    # Expansion work (positive as work is done by the fluid)
-    w_exp = h3 - h2
+    # Improved specific impulse calculation
+    g0 = 9.81
+    Isp = thrust/(mdot * g0)
     
-    # Net work output
-    w_net = w_exp - abs(w_comp)
+    # Enhanced thermal efficiency calculation
+    q_in = Cp_e * (T_comb - T1)  # Heat addition in combustor
+    w_net = 0.5 * (V_exit**2 - V0**2)  # Net specific work
+    thermal_efficiency = w_net/q_in if q_in > 0 else 0
     
-    # Calculate thermal efficiency
-    thermal_efficiency = w_net / q_in if q_in > 0 else 0
-    
-    # Debug prints
-    print("\nDebug Information:")
-    print(f"T0 (ambient): {T0:.2f} K")
-    print(f"T1 (after ram compression): {T1:.2f} K")
-    print(f"T2 (after diffuser): {T2:.2f} K")
-    print(f"T3 (after combustion): {T3:.2f} K")
-    print(f"V0: {V0:.2f} m/s")
-    print(f"V_exit: {V_exit:.2f} m/s")
-    print(f"Compression work: {w_comp:.2f} J/kg")
-    print(f"Heat added: {q_in:.2f} J/kg")
-    print(f"Expansion work: {w_exp:.2f} J/kg")
-    print(f"Net work: {w_net:.2f} J/kg")
-    print(f"Raw thermal efficiency: {thermal_efficiency:.4f}")
+    # Improved pressure recovery calculation
+    pressure_recovery = P_ratio * (P_exit/P_comb)
     
     return {
         'thrust': thrust,
-        'specific_impulse': isp,
+        'specific_impulse': Isp,
         'thermal_efficiency': thermal_efficiency,
-        'pressure_ratio': P_ratio,
-        'temperature_ratio': T_ratio,
-        'mass_flow': mdot
+        'pressure_ratio': pressure_recovery,
+        'temperature_ratio': T_comb/T0,
+        'mass_flow': mdot,
+        'exit_mach': M_exit,
+        'combustion_temp': T_comb
     }
 
 def export_dxf_profile(params=None):
