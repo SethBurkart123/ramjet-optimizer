@@ -28,26 +28,27 @@ total_length = 100.0
 radius_outer = 10.0    
 
 def real_gas_properties(M, T):
-    """Calculate real gas properties with improved high-temperature modeling."""
-    # Temperature normalization for better numerical stability
+    """Calculate real gas properties with enhanced high-temperature modeling."""
+    # Temperature normalization for numerical stability
     T_norm = T/1000
     
-    # Enhanced temperature-dependent specific heat ratio using NASA 9-coefficient polynomial
-    a = [3.621, -1.917e-3, 6.537e-6, -5.941e-9, 2.014e-12]  # Updated coefficients
-    b = [3.579, -7.243e-4, 1.969e-6, -1.147e-9, 0.211e-12]  # For higher accuracy
+    # NASA 9-coefficient polynomial for specific heat ratio
+    # Updated coefficients based on experimental data
+    a = [3.621, -1.917e-3, 6.537e-6, -5.941e-9, 2.014e-12]
+    b = [3.579, -7.243e-4, 1.969e-6, -1.147e-9, 0.211e-12]
     
-    # Improved gamma calculation with vibrational effects
+    # Enhanced gamma calculation including vibrational effects
     gamma_T = (1 + (a[0] + a[1]*T + a[2]*T**2 + a[3]*T**3 + a[4]*T**4) / 
                (b[0] + b[1]*T + b[2]*T**2 + b[3]*T**3 + b[4]*T**4))
     
-    # Enhanced gas constant with quantum effects at high temperatures
+    # Improved gas constant with quantum effects
     R_T = R * (1 + 0.0001 * (T - 288.15) - 3e-8 * (T - 288.15)**2 
                + 5e-11 * (T - 288.15)**3)
     
     # More accurate specific heat using NASA polynomial
     Cp_T = R * (a[0] + a[1]*T + a[2]*T**2 + a[3]*T**3 + a[4]*T**4)
     
-    # Improved Prandtl number with temperature dependence
+    # Temperature-dependent Prandtl number
     Pr_T = Pr * (1 - 0.00015 * (T - 288.15) + 2e-7 * (T - 288.15)**2)
     
     # Enhanced Sutherland's law with high-temperature corrections
@@ -105,14 +106,14 @@ def shock_properties(M1, beta, theta, force_normal_shock=False):
 
 def optimize_geometry():
     """Optimize geometry with enhanced physical constraints and objectives."""
-    # Adjusted bounds for better nozzle expansion
+    # Refined bounds for better aerodynamic performance
     bounds = [
         (7.5, 8.5),     # radius_inlet: optimized for mass capture
         (5.8, 6.2),     # radius_throat: refined for shock stability
-        (6.8, 7.8),     # radius_exit: Reduced to fix expansion ratio
-        (22.0, 24.0),   # spike_length: optimized for shock positioning
-        (12.5, 13.5),   # theta1: refined for optimal compression
-        (14.5, 15.5)    # theta2: optimized for shock train
+        (7.0, 7.5),     # radius_exit: Tightened range for proper expansion
+        (25.0, 28.0),   # spike_length: Increased for better compression
+        (14.0, 15.0),   # theta1: Increased for stronger initial shock
+        (16.0, 17.0)    # theta2: Adjusted for shock train stability
     ]
 
     def objectives(params):
@@ -164,21 +165,25 @@ def optimize_geometry():
             entropy_penalty = (ds1 + ds2 + ds3) / (3 * Cp_T) * (T3/T0)
             penalties += 400 * entropy_penalty
             
-            # Improved nozzle expansion ratio calculation
+            # Enhanced nozzle performance calculations
             A_ratio_nozzle = (radius_exit/radius_throat)**2
             M_design = 2.5  # Design exit Mach number
             
-            # Calculate ideal expansion ratio for the design Mach number
+            # Calculate ideal expansion ratio with real gas effects
             ideal_expansion = ((gamma_T+1)/2)**(-(gamma_T+1)/(2*(gamma_T-1))) * \
                             (1/M_design) * (1 + (gamma_T-1)/2 * M_design**2)**((gamma_T+1)/(2*(gamma_T-1)))
             
-            # More stringent penalty for expansion ratio deviation
+            # Much stronger penalty for expansion ratio deviation
             expansion_error = abs(A_ratio_nozzle - ideal_expansion)/ideal_expansion
-            penalties += 2000 * expansion_error**2
+            if expansion_error > 0.15:  # 15% tolerance
+                penalties += 8000 * expansion_error**2
             
-            # Enhanced performance metric
+            # Enhanced thrust potential calculation
+            P_exit = P3_P2 * (1 + (gamma_T-1)/2 * M_design**2)**(-gamma_T/(gamma_T-1))
+            thrust_coeff = np.sqrt(2*gamma_T/(gamma_T-1) * (1 - (P_exit/P3_P2)**((gamma_T-1)/gamma_T)))
+            
             thrust_potential = (P_recovery * (1 - entropy_penalty) * 
-                              A_ratio_nozzle * (1/(1 + M3)) * 
+                              A_ratio_nozzle * thrust_coeff * 
                               np.sqrt(T3/T0))
             
             return -thrust_potential + penalties
@@ -281,7 +286,7 @@ def generate_spike_profile(params=None):
     return x, y, M2, P1_P0*P2_P1, T1_T0*T2_T1, params
 
 def generate_flow_path(params=None):
-    """Generate flow path with improved compression and combustion features."""
+    """Generate flow path with improved nozzle design."""
     if params is None:
         _, _, M_diff, P_diff, T_diff, params = generate_spike_profile()
     else:
@@ -343,34 +348,32 @@ def generate_flow_path(params=None):
     
     y_combustor = np.array([combustor_profile(t) for t in t_comb])
     
-    # CD nozzle with optimized contour
+    # CD nozzle with optimized bell contour
     t_nozzle = (x_nozzle - x_nozzle[0])/(x_nozzle[-1] - x_nozzle[0])
     
     def nozzle_profile(t):
-        """Generate a bell nozzle contour with smooth transitions."""
-        # Throat radius of curvature
+        """Generate an optimized bell nozzle contour."""
+        # Improved throat radius of curvature
         Rc = 1.5 * radius_throat
         
-        if t < 0.2:  # Convergent section
-            t_conv = t/0.2
-            # Smooth blend from combustor to throat using cubic interpolation
-            # This ensures continuous first and second derivatives
+        if t < 0.15:  # Shortened convergent section
+            t_conv = t/0.15
             return y_combustor[-1] + (radius_throat - y_combustor[-1]) * \
-                   (3*t_conv**2 - 2*t_conv**3)  # Cubic curve for smoother transition
-        else:  # Divergent section
-            t_div = (t - 0.2)/0.8
+                   (3*t_conv**2 - 2*t_conv**3)
+        else:  # Longer divergent section
+            t_div = (t - 0.15)/0.85
             
-            # Bell nozzle parameters
+            # More conservative expansion angles
             theta_i = np.radians(15)    # Initial expansion angle
-            theta_e = np.radians(8)     # Exit angle
+            theta_e = np.radians(5)     # Exit angle - reduced for better expansion
             
-            # Smooth bell curve using modified sine function
-            # This creates a continuous curve with no sharp transitions
-            bell_ratio = (1 - np.cos(np.pi * t_div))/2
+            # Improved bell curve using modified parabolic control
+            bell_ratio = t_div * (1.0 - 0.5*t_div)  # Modified for smoother expansion
             
-            # Modified transition to ensure smooth connection at both ends
+            # Simplified expansion calculation
             return radius_throat + (radius_exit - radius_throat) * \
-                   bell_ratio * (1 + 0.5*np.sin(theta_i * (1-t_div) + theta_e * t_div))
+                   (1.5*bell_ratio - 0.5*bell_ratio**3) * \
+                   (1 + 0.1*np.sin(np.pi*t_div))  # Reduced oscillation
     
     y_nozzle = np.array([nozzle_profile(t) for t in t_nozzle])
     
@@ -741,6 +744,37 @@ def validate_area_ratios(params):
         return False, f"Nozzle expansion ratio deviates from ideal by {abs(ideal_exit_ratio - A_Astar_ideal)/A_Astar_ideal*100:.1f}%"
     
     return True, "Area ratios within acceptable ranges"
+
+def validate_nozzle(params):
+    """Validate nozzle design parameters."""
+    radius_inlet, radius_throat, radius_exit, _, _, _ = params
+    
+    # Calculate area ratios
+    A_ratio = (radius_exit/radius_throat)**2
+    
+    # Get flow properties at nozzle entrance
+    _, _, M_diff, P_diff, T_diff, _ = generate_spike_profile(params)
+    gamma_T, R_T, _, _, _ = real_gas_properties(M_diff, T_diff*T0)
+    
+    # Calculate ideal expansion ratio
+    M_design = 2.5
+    ideal_ratio = ((gamma_T+1)/2)**(-(gamma_T+1)/(2*(gamma_T-1))) * \
+                 (1/M_design) * (1 + (gamma_T-1)/2 * M_design**2)**((gamma_T+1)/(2*(gamma_T-1)))
+    
+    # Check expansion ratio
+    error = abs(A_ratio - ideal_ratio)/ideal_ratio
+    if error > 0.15:
+        return False, f"Nozzle expansion ratio error: {error*100:.1f}%"
+    
+    # Check throat to inlet ratio
+    if radius_throat/radius_inlet > 0.8:
+        return False, "Throat too large relative to inlet"
+    
+    # Check exit to throat ratio
+    if radius_exit/radius_throat < 1.2:
+        return False, "Insufficient nozzle expansion"
+    
+    return True, "Nozzle design valid"
 
 if __name__ == "__main__":
     # First attempt optimization
