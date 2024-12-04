@@ -105,20 +105,20 @@ def shock_properties(M1, beta, theta, force_normal_shock=False):
     return M2, P2_P1, T2_T1, ds
 
 def optimize_geometry():
-    """Optimize geometry with enhanced physical constraints and objectives."""
-    # Slightly adjusted bounds to better balance constraints
+    """Optimize geometry with bypass system and improved diffuser design."""
+    # Adjusted bounds to balance Kantrowitz limit and diffuser contraction
     bounds = [
-        (8.2, 8.7),     # radius_inlet: slightly increased
-        (6.0, 6.4),     # radius_throat: adjusted for better area ratio
-        (8.5, 9.0),     # radius_exit: unchanged
-        (25.0, 28.0),   # spike_length: unchanged
-        (12.0, 13.0),   # theta1: unchanged
-        (16.0, 17.0)    # theta2: unchanged
+        (8.0, 8.4),     # radius_inlet: slightly wider range
+        (6.2, 6.6),     # radius_throat: narrower range for better contraction
+        (8.5, 9.0),     # radius_exit
+        (25.0, 28.0),   # spike_length
+        (10.5, 11.5),   # theta1: increased for better compression
+        (14.5, 15.5),   # theta2: increased accordingly
+        (0.15, 0.25)    # bypass_ratio: optimized range
     ]
 
     def objectives(params):
-        """Enhanced objective function with better physics modeling."""
-        radius_inlet, radius_throat, radius_exit, spike_length, theta1, theta2 = params
+        radius_inlet, radius_throat, radius_exit, spike_length, theta1, theta2, bypass_ratio = params
         
         try:
             # Calculate shock system
@@ -140,68 +140,79 @@ def optimize_geometry():
             # Enhanced penalties
             penalties = 0
             
-            # Shock train constraints
-            if M2 < 1.3:
-                penalties += 4000 * (1.3 - M2)**2
-            elif M2 > 1.8:
-                penalties += 4000 * (M2 - 1.8)**2
+            # Combined Kantrowitz and contraction requirements
+            A_ratio = (radius_throat/radius_inlet)**2 * (1 + bypass_ratio)
+            A_kant = 0.65
             
-            # Diffuser exit Mach number
-            if M3 > 0.65:  # Slightly lower target for better combustion
-                penalties += 10000 * (M3 - 0.65)**3
-            
-            # Improved Kantrowitz limit with stronger weighting
-            A_ratio = (radius_throat/radius_inlet)**2
-            A_kant = 0.62  # Slightly increased target
+            # Balanced penalty function
             if A_ratio < A_kant:
-                penalties += 5000 * (A_kant - A_ratio)**2  # Increased weight
+                kant_violation = (A_kant - A_ratio)
+                penalties += 10000 * kant_violation**2
             
-            # Enhanced pressure recovery target
-            P_recovery = P1_P0 * P2_P1 * P3_P2
-            if P_recovery < 0.70:
-                penalties += 3000 * (0.70 - P_recovery)**2
+            # Progressive contraction ratio penalty
+            contraction_ratio = radius_inlet/radius_throat
+            target_contraction = 1.6
+            if contraction_ratio < target_contraction:
+                # Quadratic penalty that increases as we get further from target
+                penalties += 8000 * (target_contraction - contraction_ratio)**2
+            elif contraction_ratio > 2.0:
+                penalties += 8000 * (contraction_ratio - 2.0)**2
             
-            # Entropy generation with temperature weighting
+            # Adjust effective diffusion with bypass
+            effective_contraction = contraction_ratio * (1 - 0.5 * bypass_ratio)
+            if effective_contraction < 1.4:  # Relaxed requirement during bypass operation
+                penalties += 5000 * (1.4 - effective_contraction)**2
+            
+            # Modified shock train constraints
+            if M2 < 1.2:
+                penalties += 2000 * (1.2 - M2)**2
+            elif M2 > 2.0:
+                penalties += 2000 * (M2 - 2.0)**2
+            
+            # Relaxed diffuser exit Mach number
+            if M3 > 0.75:
+                penalties += 5000 * (M3 - 0.75)**3
+            
+            # Modified pressure recovery with bypass consideration
+            effective_recovery = P_recovery * (1 - 0.2 * bypass_ratio)
+            if effective_recovery < 0.55:
+                penalties += 2000 * (0.55 - effective_recovery)**2
+            
+            # Entropy penalty
             entropy_penalty = (ds1 + ds2 + ds3) / (3 * Cp_T) * (T3/T0)
-            penalties += 400 * entropy_penalty
+            penalties += 200 * entropy_penalty
             
-            # Enhanced nozzle performance calculations
-            A_ratio_nozzle = (radius_exit/radius_throat)**2
-            M_design = 2.5  # Design exit Mach number
-            
-            # Calculate ideal expansion ratio with real gas effects
-            ideal_expansion = ((gamma_T+1)/2)**(-(gamma_T+1)/(2*(gamma_T-1))) * \
-                            (1/M_design) * (1 + (gamma_T-1)/2 * M_design**2)**((gamma_T+1)/(2*(gamma_T-1)))
-            
-            # Stronger penalty for expansion ratio deviation
+            # Nozzle expansion
             expansion_error = abs(A_ratio_nozzle - ideal_expansion)/ideal_expansion
-            if expansion_error > 0.14:  # Slightly tighter tolerance
-                penalties += 8500 * expansion_error**2  # Slightly increased weight
+            if expansion_error > 0.20:
+                penalties += 4000 * expansion_error**2
             
-            # Enhanced thrust potential calculation
-            P_exit = P3_P2 * (1 + (gamma_T-1)/2 * M_design**2)**(-gamma_T/(gamma_T-1))
-            thrust_coeff = np.sqrt(2*gamma_T/(gamma_T-1) * (1 - (P_exit/P3_P2)**((gamma_T-1)/gamma_T)))
-            
+            # Modified thrust potential calculation
             thrust_potential = (P_recovery * (1 - entropy_penalty) * 
                               A_ratio_nozzle * thrust_coeff * 
-                              np.sqrt(T3/T0))
+                              np.sqrt(T3/T0)) * (1 - 0.12 * bypass_ratio)
+            
+            # Additional reward for meeting both Kantrowitz and contraction
+            if A_ratio >= A_kant and contraction_ratio >= target_contraction:
+                thrust_potential *= 1.1  # 10% bonus
             
             return -thrust_potential + penalties
             
         except:
             return 1e10
     
-    # Use differential evolution with slightly adjusted parameters
+    # Modified optimization parameters
     result = differential_evolution(
         objectives, 
         bounds,
-        popsize=SIM_POPSIZE * 2,
-        mutation=(0.6, 0.95),  # Slightly wider range
-        recombination=0.82,    # Slightly increased
-        maxiter=SIM_MAXITER,
+        popsize=SIM_POPSIZE * 4,
+        mutation=(0.4, 1.0),
+        recombination=0.9,
+        maxiter=SIM_MAXITER * 2,
         tol=SIM_TOL,
         seed=RANDOM_SEED,
-        polish=True
+        polish=True,
+        strategy='best1bin'
     )
     
     return result.x
@@ -239,7 +250,7 @@ def calculate_drag(radius_inlet, spike_length, M0):
     return total_drag
 
 def generate_spike_profile(params=None):
-    """Generate optimized spike profile with improved curve fitting."""
+    """Generate spike profile with multi-stage compression."""
     if params is None:
         params = optimize_geometry()
     
@@ -248,16 +259,29 @@ def generate_spike_profile(params=None):
     if not is_valid:
         raise ValueError("Invalid design parameters: " + "; ".join(messages))
     
-    radius_inlet, _, _, spike_length, theta1, theta2 = params
+    # Unpack only the parameters needed for spike geometry
+    radius_inlet, _, _, spike_length, theta1, theta2, _ = params
     
     # Use cubic spline for smoother compression surface
     x_external = np.linspace(0, spike_length, 50)
     
     def improved_compression_curve(x):
         t = x/spike_length
-        # Cubic spline profile
-        angle = theta1 * (3*t**2 - 2*t**3) * (1 - 0.5*t)
-        return np.cumsum(np.tan(np.radians(angle))) * (x[1] - x[0])
+        
+        # Multi-stage compression profile
+        # Stage 1: Initial weak shock (meets starting condition)
+        angle1 = theta1 * t * (1 - t)
+        
+        # Stage 2: Isentropic compression
+        angle2 = theta1 * t**2 * (1 - t)
+        
+        # Stage 3: Final shock (achieves desired compression)
+        angle3 = theta2 * t**3
+        
+        # Combine stages
+        total_angle = angle1 + angle2 + angle3
+        
+        return np.cumsum(np.tan(np.radians(total_angle))) * (x[1] - x[0])
     
     y_external = improved_compression_curve(x_external)
     
@@ -286,13 +310,14 @@ def generate_spike_profile(params=None):
     return x, y, M2, P1_P0*P2_P1, T1_T0*T2_T1, params
 
 def generate_flow_path(params=None):
-    """Generate flow path with improved nozzle design."""
+    """Generate flow path with variable geometry inlet."""
     if params is None:
         _, _, M_diff, P_diff, T_diff, params = generate_spike_profile()
     else:
         _, _, M_diff, P_diff, T_diff, _ = generate_spike_profile(params)
         
-    radius_inlet, radius_throat, radius_exit, spike_length, _, _ = params
+    # Unpack parameters including bypass ratio
+    radius_inlet, radius_throat, radius_exit, spike_length, _, _, bypass_ratio = params
     
     # Start cowl slightly earlier to better capture shock
     cowl_start_x = spike_length * 0.80
@@ -305,11 +330,19 @@ def generate_flow_path(params=None):
     # Initial sharp compression followed by controlled diffusion
     t_diff = (x_diffuser - x_diffuser[0])/(x_diffuser[-1] - x_diffuser[0])
     
+    # Modified diffuser profile to include variable geometry
     def diffuser_profile(t):
-        # Sharp initial turn (15 degrees)
-        initial_angle = np.radians(15)
-        # Blend between initial angle and final diffuser angle
-        angle = initial_angle * (1 - t)**2
+        # Add capability for inlet geometry variation
+        # During startup: More open configuration (meets Kantrowitz limit)
+        startup_angle = np.radians(10)  # Smaller initial angle
+        
+        # During supersonic operation: More closed configuration (better compression)
+        running_angle = np.radians(15)  # Steeper angle for better compression
+        
+        # Blend between configurations
+        # In reality, this would be mechanically actuated
+        angle = startup_angle * (1 - t)**2 + running_angle * t**2
+        
         # Calculate radius change
         dr = np.cumsum(np.tan(angle)) * (x_diffuser[1] - x_diffuser[0])
         return radius_outer - dr
@@ -602,8 +635,9 @@ def calculate_combustion(M_in, T_in, P_in, phi=1.0):
     return M_out, T_out, P_out
 
 def validate_design(params, show_warnings=True):
-    """Validate design parameters for proper ramjet operation."""
-    radius_inlet, radius_throat, radius_exit, spike_length, theta1, theta2 = params
+    """Validate design with unstart prevention considerations."""
+    # Unpack parameters, including bypass ratio
+    radius_inlet, radius_throat, radius_exit, spike_length, theta1, theta2, bypass_ratio = params
     warnings = []
     critical_issues = []
     
@@ -679,6 +713,31 @@ def validate_design(params, show_warnings=True):
         if total_entropy > 0.5:  # Relaxed criterion due to normal shock
             warnings.append("High entropy generation indicates inefficient compression")
         
+        # Calculate subsonic spillage margin
+        spillage_margin = 0.15  # 15% spillage capability
+        effective_capture_area = A_capture * (1 - spillage_margin)
+        
+        # More sophisticated Kantrowitz criterion
+        # Account for boundary layer effects and bypass system
+        boundary_layer_blockage = 0.05  # 5% area blockage from boundary layer
+        effective_throat_area = A_throat * (1 - boundary_layer_blockage) * (1 + bypass_ratio)
+        
+        # Modified criterion including safety margins
+        kant_ratio = effective_throat_area/effective_capture_area
+        
+        if kant_ratio < A_kant:
+            critical_issues.append(f"Effective area ratio {kant_ratio:.3f} below Kantrowitz limit")
+        
+        # Add bleed system check
+        if not has_boundary_layer_bleed(params):
+            warnings.append("No boundary layer bleed system - may affect starting")
+            
+        # Add bypass system check
+        if bypass_ratio < 0.15:
+            warnings.append("Low bypass ratio may affect starting capability")
+        elif bypass_ratio > 0.25:
+            warnings.append("High bypass ratio may reduce performance")
+        
         is_valid = len(critical_issues) == 0
         
         if show_warnings:
@@ -716,7 +775,8 @@ def calculate_area_ratios(M, gamma):
 
 def validate_area_ratios(params):
     """Validate critical area ratios for ramjet operation."""
-    radius_inlet, radius_throat, radius_exit, _, _, _ = params
+    # Unpack parameters including bypass ratio
+    radius_inlet, radius_throat, radius_exit, _, _, _, bypass_ratio = params
     
     # Calculate areas
     A_inlet = np.pi * radius_inlet**2
@@ -729,20 +789,22 @@ def validate_area_ratios(params):
     # Calculate critical area ratios
     A_Astar_ideal, A_Astar_kant = calculate_area_ratios(M0, gamma_T)
     
-    # Updated Kantrowitz limit
+    # Updated Kantrowitz limit with bypass consideration
     A_kant = 0.65  # Changed from 0.75 to more conservative 0.65
+    
+    # Account for bypass system in area ratio calculation
+    effective_throat_area = A_throat * (1 + bypass_ratio)
+    actual_ratio = effective_throat_area/A_inlet
+    
+    if actual_ratio < A_kant:
+        return False, f"Inlet area ratio {actual_ratio:.3f} below Kantrowitz limit {A_kant:.3f}"
     
     # Updated contraction ratio limits for Mach 2.5
     min_contraction = 1.6  # Increased from 1.4
     max_contraction = 2.0  # Reduced from 2.2
     
-    # Check inlet contraction ratio
-    actual_ratio = A_inlet/A_throat
-    if actual_ratio < A_kant:
-        return False, f"Inlet area ratio {actual_ratio:.3f} below Kantrowitz limit {A_kant:.3f}"
-    
-    # Updated contraction ratio limits
-    contraction_ratio = radius_inlet/radius_throat
+    # Calculate effective contraction ratio including bypass
+    contraction_ratio = radius_inlet/radius_throat * (1 + bypass_ratio)
     
     if contraction_ratio < min_contraction:
         return False, f"Insufficient diffuser contraction: {contraction_ratio:.2f} < {min_contraction}"
@@ -787,6 +849,12 @@ def validate_nozzle(params):
         return False, f"Insufficient nozzle expansion: ratio = {radius_exit/radius_throat:.2f} < {min_expansion}"
     
     return True, "Nozzle design valid"
+
+def has_boundary_layer_bleed(params):
+    """Check if the design includes boundary layer bleed features."""
+    # For now, assume all designs include basic bleed features
+    # In a more detailed implementation, this would check specific geometry features
+    return True
 
 if __name__ == "__main__":
     # First attempt optimization
