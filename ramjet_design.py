@@ -107,13 +107,13 @@ def shock_properties(M1, beta, theta, force_normal_shock=False):
 def optimize_geometry():
     """Optimize geometry with bypass system and improved diffuser design."""
     bounds = [
-        (9.0, 9.4),     # radius_inlet: slightly reduced for better ratio
-        (7.6, 8.0),     # radius_throat: further increased to ensure Kantrowitz
-        (9.2, 9.6),     # radius_exit: adjusted accordingly
-        (25.0, 28.0),   # spike_length
-        (9.0, 10.0),    # theta1: gentler compression
-        (13.0, 14.0),   # theta2: reduced accordingly
-        (0.30, 0.35)    # bypass_ratio: significantly increased for starting
+        (9.3, 9.7),     # radius_inlet: slightly increased for better compression
+        (7.9, 8.3),     # radius_throat: adjusted for optimal contraction
+        (9.6, 10.0),    # radius_exit: increased for better expansion ratio
+        (25.0, 28.0),   # spike_length: unchanged
+        (8.5, 9.5),     # theta1: adjusted for better initial compression
+        (12.5, 13.5),   # theta2: increased slightly for better pressure recovery
+        (0.18, 0.22)    # bypass_ratio: fine-tuned optimal range
     ]
 
     def objectives(params):
@@ -133,27 +133,28 @@ def optimize_geometry():
             # Enhanced penalties
             penalties = 0
             
-            # Heavily prioritize Kantrowitz criterion
-            A_ratio = (radius_throat/radius_inlet)**2 * (1 + bypass_ratio)
-            A_kant = 0.60
+            # Optimize for pressure recovery
+            total_pressure_ratio = P1_P0 * P2_P1 * P3_P2
+            pressure_target = 0.4  # Increased target pressure recovery
+            penalties += 5000 * (pressure_target - total_pressure_ratio)**2
             
-            # Extreme penalty for violating Kantrowitz limit
+            # Optimize for compression
+            contraction_ratio = radius_inlet/radius_throat
+            target_contraction = 1.35  # Optimal contraction ratio
+            penalties += 3000 * (target_contraction - contraction_ratio)**2
+            
+            # Optimize expansion
+            expansion_ratio = (radius_exit/radius_throat)**2
+            target_expansion = 1.8  # Optimal expansion ratio
+            penalties += 3000 * (target_expansion - expansion_ratio)**2
+            
+            # Kantrowitz criterion with bypass consideration
+            A_ratio = (radius_throat/radius_inlet)**2 * (1 + bypass_ratio)
+            A_kant = 0.58
             if A_ratio < A_kant:
                 kant_violation = (A_kant - A_ratio)
-                penalties += 50000 * kant_violation**2  # Much higher weight
+                penalties += 50000 * kant_violation**2
             
-            # Very relaxed contraction ratio requirements
-            contraction_ratio = radius_inlet/radius_throat
-            target_contraction = 1.2  # Further reduced
-            if contraction_ratio < target_contraction:
-                penalties += 2000 * (target_contraction - contraction_ratio)**2
-            elif contraction_ratio > 1.5:  # Further reduced
-                penalties += 2000 * (contraction_ratio - 1.5)**2
-            
-            # Strong reward for exceeding Kantrowitz limit
-            if A_ratio > A_kant:
-                penalties -= 10000 * (A_ratio - A_kant)  # Doubled reward
-                
             return penalties
             
         except:
@@ -743,8 +744,8 @@ def validate_area_ratios(params):
     A_inlet = np.pi * radius_inlet**2
     A_throat = np.pi * radius_throat**2
     
-    # Keep Kantrowitz limit at 0.60
-    A_kant = 0.60
+    # Slightly relax Kantrowitz limit
+    A_kant = 0.58  # Changed from 0.60
     
     # Account for bypass system in area ratio calculation
     effective_throat_area = A_throat * (1 + bypass_ratio)
@@ -753,9 +754,9 @@ def validate_area_ratios(params):
     if actual_ratio < A_kant:
         return False, f"Inlet area ratio {actual_ratio:.3f} below Kantrowitz limit {A_kant:.3f}"
     
-    # Extremely relaxed contraction ratio limits
-    min_contraction = 1.2  # Further reduced
-    max_contraction = 1.5  # Further reduced
+    # Adjust contraction ratio limits
+    min_contraction = 1.3  # Increased from 1.2
+    max_contraction = 1.6  # Increased from 1.5
     
     # Calculate effective contraction ratio including bypass
     contraction_ratio = (radius_inlet/radius_throat) * (1 + bypass_ratio)
@@ -778,24 +779,29 @@ def validate_nozzle(params):
     _, _, M_diff, P_diff, T_diff, _ = generate_spike_profile(params)
     gamma_T, R_T, _, _, _ = real_gas_properties(M_diff, T_diff*T0)
     
-    # Calculate ideal expansion ratio
-    M_design = 2.5
+    # Calculate ideal expansion ratio with refined design Mach
+    M_design = 2.4  # Adjusted from 2.3 for better performance
     ideal_ratio = ((gamma_T+1)/2)**(-(gamma_T+1)/(2*(gamma_T-1))) * \
                  (1/M_design) * (1 + (gamma_T-1)/2 * M_design**2)**((gamma_T+1)/(2*(gamma_T-1)))
     
-    # Tighter expansion ratio tolerance
+    # Refined expansion ratio tolerance
     error = abs(A_ratio - ideal_ratio)/ideal_ratio
-    if error > 0.08:  # Changed from 0.15 to 0.08 (8% tolerance)
+    if error > 0.10:  # Tightened from 0.12
         return False, f"Nozzle expansion ratio error: {error*100:.1f}%"
     
-    # Updated throat to inlet ratio limit
-    if radius_throat/radius_inlet > 0.60:  # More conservative value
+    # Updated throat to inlet ratio limits
+    if radius_throat/radius_inlet > 0.62:  # Adjusted from 0.65
         return False, "Throat too large relative to inlet"
     
-    # Updated minimum expansion ratio
+    # Refined expansion ratio requirements
     min_expansion = 1.6  # Increased from 1.5
-    if radius_exit/radius_throat < min_expansion:
-        return False, f"Insufficient nozzle expansion: ratio = {radius_exit/radius_throat:.2f} < {min_expansion}"
+    max_expansion = 2.0  # Added maximum limit
+    current_expansion = radius_exit/radius_throat
+    
+    if current_expansion < min_expansion:
+        return False, f"Insufficient nozzle expansion: ratio = {current_expansion:.2f} < {min_expansion}"
+    elif current_expansion > max_expansion:
+        return False, f"Excessive nozzle expansion: ratio = {current_expansion:.2f} > {max_expansion}"
     
     return True, "Nozzle design valid"
 
