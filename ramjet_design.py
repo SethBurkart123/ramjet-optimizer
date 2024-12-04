@@ -730,7 +730,11 @@ def validate_area_ratios(params):
     A_Astar_ideal, A_Astar_kant = calculate_area_ratios(M0, gamma_T)
     
     # Updated Kantrowitz limit
-    A_kant = 0.75  # Changed from 0.6 to 0.75
+    A_kant = 0.65  # Changed from 0.75 to more conservative 0.65
+    
+    # Updated contraction ratio limits for Mach 2.5
+    min_contraction = 1.6  # Increased from 1.4
+    max_contraction = 2.0  # Reduced from 2.2
     
     # Check inlet contraction ratio
     actual_ratio = A_inlet/A_throat
@@ -738,8 +742,6 @@ def validate_area_ratios(params):
         return False, f"Inlet area ratio {actual_ratio:.3f} below Kantrowitz limit {A_kant:.3f}"
     
     # Updated contraction ratio limits
-    min_contraction = 1.4  # Changed from 1.2
-    max_contraction = 2.5  # Changed from 2.0
     contraction_ratio = radius_inlet/radius_throat
     
     if contraction_ratio < min_contraction:
@@ -772,15 +774,15 @@ def validate_nozzle(params):
     
     # Tighter expansion ratio tolerance
     error = abs(A_ratio - ideal_ratio)/ideal_ratio
-    if error > 0.10:  # Changed from 0.15 to 0.10
+    if error > 0.08:  # Changed from 0.15 to 0.08 (8% tolerance)
         return False, f"Nozzle expansion ratio error: {error*100:.1f}%"
     
     # Updated throat to inlet ratio limit
-    if radius_throat/radius_inlet > 0.7:  # Changed from 0.8
+    if radius_throat/radius_inlet > 0.60:  # More conservative value
         return False, "Throat too large relative to inlet"
     
     # Updated minimum expansion ratio
-    min_expansion = 1.4  # Changed from 1.2
+    min_expansion = 1.6  # Increased from 1.5
     if radius_exit/radius_throat < min_expansion:
         return False, f"Insufficient nozzle expansion: ratio = {radius_exit/radius_throat:.2f} < {min_expansion}"
     
