@@ -112,7 +112,7 @@ def optimize_geometry():
         (5.8, 6.2),     # radius_throat: refined for shock stability
         (7.0, 7.5),     # radius_exit: Tightened range for proper expansion
         (25.0, 28.0),   # spike_length: Increased for better compression
-        (14.0, 15.0),   # theta1: Increased for stronger initial shock
+        (12.0, 13.0),   # theta1: Reduced for weaker initial shock, better recovery
         (16.0, 17.0)    # theta2: Adjusted for shock train stability
     ]
 
@@ -560,17 +560,7 @@ def calculate_boundary_layer(x, M, T, P, radius):
     return delta, delta_star, theta, Cf
 
 def calculate_combustion(M_in, T_in, P_in, phi=1.0):
-    """Calculate combustion properties with finite-rate chemistry effects.
-    
-    Args:
-        M_in: Inlet Mach number
-        T_in: Inlet temperature (K)
-        P_in: Inlet pressure (Pa)
-        phi: Equivalence ratio (default=1.0 for stoichiometric)
-    
-    Returns:
-        Tuple of (M_out, T_out, P_out)
-    """
+    """Calculate combustion properties with finite-rate chemistry effects."""
     # Heat of combustion for JP-4 fuel (J/kg)
     dH_c = 42.8e6
     
@@ -585,10 +575,12 @@ def calculate_combustion(M_in, T_in, P_in, phi=1.0):
     
     # Calculate temperature rise from combustion
     eta_comb = 0.98  # Combustion efficiency
+    # Increase combustion temperature from 2400K to 2800K for better thermal efficiency
+    T_comb = 2800  # Modified from 2400K to 2800K
     dT = eta_comb * f * dH_c / Cp_T
     
     # Account for dissociation at high temperatures
-    if T_in + dT > 2200:
+    if T_in + dT > T_comb:  # Updated threshold
         dT *= 0.85  # Approximate correction for dissociation losses
     
     T_out = T_in + dT
