@@ -729,14 +729,23 @@ def validate_area_ratios(params):
     # Calculate critical area ratios
     A_Astar_ideal, A_Astar_kant = calculate_area_ratios(M0, gamma_T)
     
+    # Updated Kantrowitz limit
+    A_kant = 0.75  # Changed from 0.6 to 0.75
+    
     # Check inlet contraction ratio
     actual_ratio = A_inlet/A_throat
-    if A_Astar_kant and actual_ratio < A_Astar_kant:
-        return False, f"Inlet area ratio {actual_ratio:.3f} below Kantrowitz limit {A_Astar_kant:.3f}"
+    if actual_ratio < A_kant:
+        return False, f"Inlet area ratio {actual_ratio:.3f} below Kantrowitz limit {A_kant:.3f}"
     
-    # Check diffuser contraction
-    if A_throat/A_inlet > 0.8:
-        return False, "Insufficient diffuser contraction"
+    # Updated contraction ratio limits
+    min_contraction = 1.4  # Changed from 1.2
+    max_contraction = 2.5  # Changed from 2.0
+    contraction_ratio = radius_inlet/radius_throat
+    
+    if contraction_ratio < min_contraction:
+        return False, f"Insufficient diffuser contraction: {contraction_ratio:.2f} < {min_contraction}"
+    elif contraction_ratio > max_contraction:
+        return False, f"Excessive compression: {contraction_ratio:.2f} > {max_contraction}"
     
     # Check nozzle expansion
     ideal_exit_ratio = A_exit/A_throat
@@ -761,18 +770,19 @@ def validate_nozzle(params):
     ideal_ratio = ((gamma_T+1)/2)**(-(gamma_T+1)/(2*(gamma_T-1))) * \
                  (1/M_design) * (1 + (gamma_T-1)/2 * M_design**2)**((gamma_T+1)/(2*(gamma_T-1)))
     
-    # Check expansion ratio
+    # Tighter expansion ratio tolerance
     error = abs(A_ratio - ideal_ratio)/ideal_ratio
-    if error > 0.15:
+    if error > 0.10:  # Changed from 0.15 to 0.10
         return False, f"Nozzle expansion ratio error: {error*100:.1f}%"
     
-    # Check throat to inlet ratio
-    if radius_throat/radius_inlet > 0.8:
+    # Updated throat to inlet ratio limit
+    if radius_throat/radius_inlet > 0.7:  # Changed from 0.8
         return False, "Throat too large relative to inlet"
     
-    # Check exit to throat ratio
-    if radius_exit/radius_throat < 1.2:
-        return False, "Insufficient nozzle expansion"
+    # Updated minimum expansion ratio
+    min_expansion = 1.4  # Changed from 1.2
+    if radius_exit/radius_throat < min_expansion:
+        return False, f"Insufficient nozzle expansion: ratio = {radius_exit/radius_throat:.2f} < {min_expansion}"
     
     return True, "Nozzle design valid"
 
