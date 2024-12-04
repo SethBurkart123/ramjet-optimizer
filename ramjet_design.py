@@ -107,13 +107,13 @@ def shock_properties(M1, beta, theta, force_normal_shock=False):
 def optimize_geometry():
     """Optimize geometry with improved performance targets."""
     bounds = [
-        (9.6, 9.9),     # radius_inlet: unchanged
-        (8.2, 8.5),     # radius_throat: unchanged
-        (9.3, 9.4),     # radius_exit: FURTHER tightened and adjusted for M=2.5
-        (27.0, 29.0),   # spike_length: unchanged
-        (6.0, 7.0),     # theta1: unchanged
-        (10.0, 11.0),   # theta2: unchanged
-        (0.18, 0.22)    # bypass_ratio: unchanged
+        (9.6, 9.9),     # radius_inlet
+        (8.2, 8.5),     # radius_throat
+        (9.9, 10.2),    # radius_exit: Increased range for better expansion
+        (27.0, 29.0),   # spike_length
+        (5.0, 6.0),     # theta1: Reduced angle for better pressure recovery
+        (8.0, 9.0),     # theta2: Reduced angle for better shock system
+        (0.18, 0.22)    # bypass_ratio
     ]
 
     def objectives(params):
@@ -123,15 +123,15 @@ def optimize_geometry():
             # Calculate ideal expansion ratio first
             gamma_T, R_T, _, _, _ = real_gas_properties(M0, T0)
             ideal_ratio = ((gamma_T+1)/2)**(-(gamma_T+1)/(2*(gamma_T-1))) * \
-                         (1/2.5) * (1 + (gamma_T-1)/2 * 2.5**2)**((gamma_T+1)/(2*(gamma_T-1)))
+                         (1/M0) * (1 + (gamma_T-1)/2 * M0**2)**((gamma_T+1)/(2*(gamma_T-1)))
             
             actual_ratio = (radius_exit/radius_throat)**2
             expansion_error = abs(actual_ratio - ideal_ratio)/ideal_ratio
             
-            # Make expansion ratio the primary optimization target
-            penalties = 20000 * expansion_error**2  # Significantly increased weight
+            # Balanced weighting of objectives
+            penalties = 15000 * expansion_error**2  # Reduced weight on expansion
             
-            # Add other objectives with lower weights
+            # Increase importance of pressure recovery
             beta1 = oblique_shock_angle(M0, np.radians(theta1))
             M1, P1_P0, T1_T0, ds1 = shock_properties(M0, beta1, np.radians(theta1))
             
@@ -140,12 +140,17 @@ def optimize_geometry():
             
             M3, P3_P2, T3_T2, ds3 = shock_properties(M2, np.pi/2, 0, force_normal_shock=True)
             
-            # Secondary objectives with reduced weights
+            # Increased weight on pressure recovery
             total_pressure_ratio = P1_P0 * P2_P1 * P3_P2
-            penalties += 3000 * (0.45 - total_pressure_ratio)**2
+            penalties += 5000 * (0.45 - total_pressure_ratio)**2  # Increased from 3000
             
+            # Optimize contraction ratio for better performance
             contraction_ratio = radius_inlet/radius_throat
-            penalties += 2000 * (1.4 - contraction_ratio)**2
+            penalties += 3000 * (1.35 - contraction_ratio)**2  # Target increased from 1.4
+            
+            # Add penalty for excessive shock strength
+            shock_strength = (T2_T1 * T3_T2) / T1_T0
+            penalties += 2000 * (shock_strength - 1.8)**2  # Penalize strong shocks
             
             return penalties
             
@@ -284,15 +289,15 @@ def generate_flow_path(params=None):
     # Modified diffuser profile to include variable geometry
     def diffuser_profile(t):
         """Generate diffuser profile with improved pressure recovery."""
-        # Further optimized angles for better pressure recovery
-        startup_angle = np.radians(7)   # Further reduced for gentler initial compression
-        running_angle = np.radians(12)  # Optimized for pressure recovery
+        # Optimized angles for better pressure recovery
+        startup_angle = np.radians(5)   # Reduced from 7 for gentler compression
+        running_angle = np.radians(10)  # Reduced from 12
         
-        # Enhanced transition control with smoother blending
-        angle = startup_angle * (1 - t)**4 + running_angle * t**3
+        # Enhanced transition control
+        angle = startup_angle * (1 - t)**3 + running_angle * t**2
         
-        # Improved wall contouring for better boundary layer control
-        contour = 0.025 * np.sin(np.pi * t) * (1 - t)  # Enhanced wall contouring
+        # Improved wall contouring
+        contour = 0.015 * np.sin(np.pi * t) * (1 - t)  # Reduced from 0.025
         
         # Calculate radius change with improved smoothing
         dr = np.cumsum(np.tan(angle)) * (x_diffuser[1] - x_diffuser[0])
@@ -339,31 +344,34 @@ def generate_flow_path(params=None):
     
     def nozzle_profile(t):
         """Generate an optimized bell nozzle contour with improved expansion."""
-        # Calculate ideal expansion ratio
+        # Calculate ideal expansion ratio with more precise gas properties
         gamma_T, R_T, _, _, _ = real_gas_properties(M0, T0)
         ideal_ratio = ((gamma_T+1)/2)**(-(gamma_T+1)/(2*(gamma_T-1))) * \
-                     (1/2.5) * (1 + (gamma_T-1)/2 * 2.5**2)**((gamma_T+1)/(2*(gamma_T-1)))
+                     (1/M0) * (1 + (gamma_T-1)/2 * M0**2)**((gamma_T+1)/(2*(gamma_T-1)))
         
         # Use ideal expansion ratio to determine exit radius
         ideal_exit_radius = radius_throat * np.sqrt(ideal_ratio)
         
-        if t < 0.15:  # Convergent section
-            t_conv = t/0.15
-            # Quintic polynomial for smooth transition
+        if t < 0.2:  # Longer convergent section for better flow conditioning
+            t_conv = t/0.2
+            # Improved quintic polynomial for smoother transition
             return y_combustor[-1] + (radius_throat - y_combustor[-1]) * \
                    (10*t_conv**3 - 15*t_conv**4 + 6*t_conv**5)
         else:
-            t_div = (t - 0.15)/0.85
+            t_div = (t - 0.2)/0.8
             
-            # Simplified bell nozzle using Rao's method
-            theta_i = np.radians(25)    # Initial expansion angle from MOC
-            theta_e = np.radians(8)     # Exit angle from MOC
+            # Improved bell nozzle contour using modified Rao's method
+            theta_i = np.radians(30)    # Initial expansion angle increased
+            theta_e = np.radians(7)     # Exit angle reduced for better expansion
             
-            # Simple parabolic contour
+            # Enhanced parabolic contour with better control
             r = radius_throat + (ideal_exit_radius - radius_throat) * \
-                (2*t_div - t_div**2)    # Monotonic expansion
+                (2.2*t_div - 1.2*t_div**2)    # Modified coefficients for better matching
             
-            return r
+            # Add wall inflection for improved flow attachment
+            inflection = 0.1 * np.sin(np.pi * t_div) * (1 - t_div)
+            
+            return r + inflection
     
     y_nozzle = np.array([nozzle_profile(t) for t in t_nozzle])
     
@@ -783,17 +791,24 @@ def validate_nozzle(params):
     # Calculate actual expansion ratio
     actual_ratio = (radius_exit/radius_throat)**2
     
-    # Get ideal expansion ratio for M=2.5
+    # Get ideal expansion ratio for M=2.5 with better precision
     gamma_T, R_T, _, _, _ = real_gas_properties(M0, T0)
     ideal_ratio = ((gamma_T+1)/2)**(-(gamma_T+1)/(2*(gamma_T-1))) * \
-                 (1/2.5) * (1 + (gamma_T-1)/2 * 2.5**2)**((gamma_T+1)/(2*(gamma_T-1)))
+                 (1/M0) * (1 + (gamma_T-1)/2 * M0**2)**((gamma_T+1)/(2*(gamma_T-1)))
     
-    # Tighter tolerance
-    tolerance = 0.08  # Reduced from 0.10
+    # Tighter tolerance for better performance
+    tolerance = 0.05  # Reduced from 0.08
     error = abs(actual_ratio - ideal_ratio)/ideal_ratio
     
     if error > tolerance:
         return False, f"Nozzle expansion ratio deviates by {error*100:.1f}%"
+    
+    # Add check for minimum pressure ratio
+    P_exit_P0 = (1 + (gamma_T-1)/2 * M0**2)**(-gamma_T/(gamma_T-1))
+    if actual_ratio < ideal_ratio * 0.95:
+        return False, "Nozzle underexpanded - may reduce performance"
+    elif actual_ratio > ideal_ratio * 1.05:
+        return False, "Nozzle overexpanded - risk of flow separation"
     
     return True, "Nozzle design valid"
 
