@@ -106,14 +106,14 @@ def shock_properties(M1, beta, theta, force_normal_shock=False):
 
 def optimize_geometry():
     """Optimize geometry with enhanced physical constraints and objectives."""
-    # Refined bounds for better aerodynamic performance
+    # Slightly adjusted bounds to better balance constraints
     bounds = [
-        (8.0, 8.5),     # radius_inlet: optimized for both limits
-        (6.2, 6.6),     # radius_throat: ensures Kantrowitz limit while maintaining contraction
-        (8.5, 9.0),     # radius_exit: adjusted for proper expansion ratio at M=2.5
-        (25.0, 28.0),   # spike_length: Increased for better compression
-        (12.0, 13.0),   # theta1: Reduced for weaker initial shock, better recovery
-        (16.0, 17.0)    # theta2: Adjusted for shock train stability
+        (8.2, 8.7),     # radius_inlet: slightly increased
+        (6.0, 6.4),     # radius_throat: adjusted for better area ratio
+        (8.5, 9.0),     # radius_exit: unchanged
+        (25.0, 28.0),   # spike_length: unchanged
+        (12.0, 13.0),   # theta1: unchanged
+        (16.0, 17.0)    # theta2: unchanged
     ]
 
     def objectives(params):
@@ -150,15 +150,15 @@ def optimize_geometry():
             if M3 > 0.65:  # Slightly lower target for better combustion
                 penalties += 10000 * (M3 - 0.65)**3
             
-            # Improved Kantrowitz limit
+            # Improved Kantrowitz limit with stronger weighting
             A_ratio = (radius_throat/radius_inlet)**2
-            A_kant = 0.65
+            A_kant = 0.62  # Slightly increased target
             if A_ratio < A_kant:
-                penalties += 3000 * (A_kant - A_ratio)**2
+                penalties += 5000 * (A_kant - A_ratio)**2  # Increased weight
             
             # Enhanced pressure recovery target
             P_recovery = P1_P0 * P2_P1 * P3_P2
-            if P_recovery < 0.70:  # Higher target
+            if P_recovery < 0.70:
                 penalties += 3000 * (0.70 - P_recovery)**2
             
             # Entropy generation with temperature weighting
@@ -173,10 +173,10 @@ def optimize_geometry():
             ideal_expansion = ((gamma_T+1)/2)**(-(gamma_T+1)/(2*(gamma_T-1))) * \
                             (1/M_design) * (1 + (gamma_T-1)/2 * M_design**2)**((gamma_T+1)/(2*(gamma_T-1)))
             
-            # Much stronger penalty for expansion ratio deviation
+            # Stronger penalty for expansion ratio deviation
             expansion_error = abs(A_ratio_nozzle - ideal_expansion)/ideal_expansion
-            if expansion_error > 0.15:  # 15% tolerance
-                penalties += 8000 * expansion_error**2
+            if expansion_error > 0.14:  # Slightly tighter tolerance
+                penalties += 8500 * expansion_error**2  # Slightly increased weight
             
             # Enhanced thrust potential calculation
             P_exit = P3_P2 * (1 + (gamma_T-1)/2 * M_design**2)**(-gamma_T/(gamma_T-1))
@@ -191,13 +191,13 @@ def optimize_geometry():
         except:
             return 1e10
     
-    # Use differential evolution with improved parameters
+    # Use differential evolution with slightly adjusted parameters
     result = differential_evolution(
         objectives, 
         bounds,
         popsize=SIM_POPSIZE * 2,
-        mutation=(0.6, 0.9),  # Refined mutation range
-        recombination=0.8,    # Increased crossover rate
+        mutation=(0.6, 0.95),  # Slightly wider range
+        recombination=0.82,    # Slightly increased
         maxiter=SIM_MAXITER,
         tol=SIM_TOL,
         seed=RANDOM_SEED,
