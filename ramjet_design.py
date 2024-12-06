@@ -281,110 +281,116 @@ def generate_flow_path(params=None):
     # Generate sections
     x_diffuser = np.linspace(cowl_start_x, cowl_start_x + 25, 30)  # Longer diffuser
     x_combustor = np.linspace(x_diffuser[-1], x_diffuser[-1] + 40, 30)
-    x_nozzle = np.linspace(x_combustor[-1], total_length, 30)
+    x_nozzle = np.linspace(x_combustor[-1], total_length, 40)  # Increased resolution
     
     # Initial sharp compression followed by controlled diffusion
     t_diff = (x_diffuser - x_diffuser[0])/(x_diffuser[-1] - x_diffuser[0])
     
-    # Modified diffuser profile to include variable geometry
     def diffuser_profile(t):
         """Generate diffuser profile with improved pressure recovery."""
-        # Optimized angles for better pressure recovery
-        startup_angle = np.radians(5)   # Reduced from 7 for gentler compression
-        running_angle = np.radians(10)  # Reduced from 12
-        
-        # Enhanced transition control
+        startup_angle = np.radians(5)
+        running_angle = np.radians(10)
         angle = startup_angle * (1 - t)**3 + running_angle * t**2
-        
-        # Improved wall contouring
-        contour = 0.015 * np.sin(np.pi * t) * (1 - t)  # Reduced from 0.025
-        
-        # Calculate radius change with improved smoothing
+        contour = 0.015 * np.sin(np.pi * t) * (1 - t)
         dr = np.cumsum(np.tan(angle)) * (x_diffuser[1] - x_diffuser[0])
         return radius_outer - dr + contour
     
     y_diffuser = diffuser_profile(t_diff)
     
-    # Modify combustor to include flame holder and fuel injection
+    # Modified combustor with gradual expansion
     t_comb = (x_combustor - x_combustor[0])/(x_combustor[-1] - x_combustor[0])
-    combustor_radius = y_diffuser[-1]  # Match diffuser exit
+    combustor_radius = y_diffuser[-1]
     
     def combustor_profile(t):
-        """Generate combustor profile with enhanced flame holding features."""
-        base_radius = combustor_radius + 0.03 * t * (1 - t)  # Reduced from 0.05
+        """Generate combustor profile with advanced flame holder design."""
+        # More gradual expansion angle that increases along length
+        expansion_angle = np.radians(1.5)
+        transition = (1 - np.cos(np.pi * t)) / 2
+        expansion = transition * np.tan(expansion_angle) * (x_combustor[-1] - x_combustor[0])
         
-        # Optimize flame holder position and geometry
-        flame_holder_pos = 0.25  # Moved from 0.3
-        flame_holder_width = 0.08  # Reduced from 0.1
-        flame_holder_depth = 0.25  # Reduced from 0.3
+        base_radius = combustor_radius + expansion
         
-        # Add multiple smaller flame holders for better mixing
-        if abs(t - flame_holder_pos) < flame_holder_width/2:
-            dx = (t - flame_holder_pos)/(flame_holder_width/2)
-            return base_radius + flame_holder_depth * np.exp(-4*dx**2)
-        elif abs(t - (flame_holder_pos + 0.2)) < flame_holder_width/2:
-            dx = (t - (flame_holder_pos + 0.2))/(flame_holder_width/2)
-            return base_radius + flame_holder_depth * 0.8 * np.exp(-4*dx**2)
+        # Advanced flame holder section with radial vanes
+        flame_holder_pos = 0.25
+        flame_holder_length = 0.15
+        num_vanes = 6
         
-        # Optimize fuel injector position
-        injector_pos = 0.15  # Moved upstream from 0.2
-        injector_width = 0.04  # Reduced from 0.05
-        injector_height = 0.15  # Reduced from 0.2
+        # Check if we're in the flame holder section
+        if flame_holder_pos <= t <= flame_holder_pos + flame_holder_length:
+            local_t = (t - flame_holder_pos) / flame_holder_length
+            
+            # Create V-shaped profile for better flame holding
+            v_angle = np.radians(15)
+            v_depth = 0.2
+            v_profile = v_depth * (1 - local_t) * np.sin(np.pi * local_t)
+            
+            # Add radial vane effects
+            vane_angle = 2 * np.pi * num_vanes * local_t
+            vane_strength = 0.08 * np.sin(vane_angle) * np.exp(-2 * (local_t - 0.5)**2)
+            
+            return base_radius - v_profile + vane_strength
+        
+        # Add smooth transition to nozzle in latter part of combustor
+        if t > 0.8:  # Start transition earlier
+            transition_t = (t - 0.8) / 0.2  # Normalize to 0-1 for transition
+            # Gradually reduce radius to match nozzle entrance
+            target_radius = combustor_radius * 0.9  # Slightly smaller to match nozzle
+            transition_factor = 0.5 * (1 - np.cos(np.pi * transition_t))
+            base_radius = base_radius * (1 - transition_factor) + target_radius * transition_factor
+        
+        # Fuel injector moved upstream of flame holder
+        injector_pos = 0.18
+        injector_width = 0.04
+        injector_height = 0.12
         
         if abs(t - injector_pos) < injector_width/2:
             dx = (t - injector_pos)/(injector_width/2)
             return base_radius - injector_height * np.exp(-4*dx**2)
-            
+        
         return base_radius
     
     y_combustor = np.array([combustor_profile(t) for t in t_comb])
     
-    # CD nozzle with optimized bell contour
-    t_nozzle = (x_nozzle - x_nozzle[0])/(x_nozzle[-1] - x_nozzle[0])
+    # Modified nozzle section with smoother entrance
+    nozzle_length = total_length - x_combustor[-1]
+    x_nozzle = np.linspace(x_combustor[-1], total_length, 40)  # Increased resolution
+    t_nozzle = (x_nozzle - x_nozzle[0])/nozzle_length  # Normalized nozzle position
     
     def nozzle_profile(t):
-        """Generate an optimized bell nozzle contour with Method of Characteristics optimization."""
-        # Get combustion temperature from combustion calculations
-        T_comb = 3600  # Typical combustion temperature [K]
+        """Generate optimized bell nozzle contour with smooth entrance."""
+        # Throat parameters
+        throat_pos = 0.25  # Moved throat back slightly
+        throat_radius = radius_outer * 0.6  # Slightly smaller throat
         
-        # Calculate ideal expansion ratio with real gas properties
-        gamma_T, R_T, _, _, _ = real_gas_properties(M0, T_comb)
-        ideal_ratio = ((gamma_T+1)/2)**(-(gamma_T+1)/(2*(gamma_T-1))) * \
-                     (1/M0) * (1 + (gamma_T-1)/2 * M0**2)**((gamma_T+1)/(2*(gamma_T-1)))
+        # Bell nozzle parameters
+        exit_radius = radius_outer * 0.85
+        theta_i = np.radians(25)  # Reduced initial angle for smoother transition
+        theta_e = np.radians(10)
         
-        ideal_exit_radius = radius_throat * np.sqrt(ideal_ratio)
-        
-        if t < 0.15:  # Shortened convergent section
-            t_conv = t/0.15
-            # Improved convergent profile using cubic Bezier curve
-            return y_combustor[-1] + (radius_throat - y_combustor[-1]) * \
-                   (3*t_conv**2 - 2*t_conv**3)
+        if t < throat_pos:
+            # Improved convergent section with smoother curve
+            t_conv = t/throat_pos
+            # Use quintic polynomial for smoother transition
+            return combustor_radius * 0.9 + (throat_radius - combustor_radius * 0.9) * \
+                   (10*t_conv**3 - 15*t_conv**4 + 6*t_conv**5)
         else:
-            t_div = (t - 0.15)/0.85  # Longer divergent section
+            # Divergent section (optimized bell contour)
+            t_div = (t - throat_pos)/(1 - throat_pos)
             
-            # Method of Characteristics-based bell nozzle contour
-            theta_i = np.radians(25)    # Initial expansion angle (reduced from 30)
-            theta_e = np.radians(5)     # Exit angle (reduced from 7)
-            
-            # Improved bell contour using TIC (Thrust-optimized Initial Contour)
-            x_norm = t_div
-            r_norm = radius_throat/radius_throat
+            # Rao's method for optimized bell nozzle
+            theta = theta_i * (1 - t_div)**2 + theta_e * t_div**2
             
             # Length ratio for optimized performance (80% of conical nozzle)
             L_ratio = 0.8
             
-            # TIC profile calculation
-            theta = theta_i * (1 - x_norm)**2 + theta_e * x_norm**2
-            r = radius_throat + (ideal_exit_radius - radius_throat) * \
-                (1.5*x_norm - 0.5*x_norm**2) * L_ratio
+            # Improved bell contour calculation
+            r = throat_radius + (exit_radius - throat_radius) * \
+                (1.5*t_div - 0.5*t_div**3) * L_ratio
             
             # Add wall inflection control
-            inflection = 0.08 * np.sin(np.pi * t_div) * (1 - t_div)**1.5
+            inflection = 0.05 * throat_radius * np.sin(np.pi * t_div) * (1 - t_div)
             
-            # Add boundary layer compensation
-            bl_compensation = 0.02 * radius_throat * (1 - np.exp(-3*t_div))
-            
-            return r + inflection + bl_compensation
+            return r + inflection
     
     y_nozzle = np.array([nozzle_profile(t) for t in t_nozzle])
     
