@@ -303,30 +303,30 @@ def generate_flow_path(params=None):
     
     def combustor_profile(t):
         """Generate combustor profile with advanced flame holder design."""
-        # More gradual expansion angle that increases along length
-        expansion_angle = np.radians(1.5)
+        # More gradual expansion angle
+        expansion_angle = np.radians(2.0)  # Increased from 1.5 for better volume
         transition = (1 - np.cos(np.pi * t)) / 2
         expansion = transition * np.tan(expansion_angle) * (x_combustor[-1] - x_combustor[0])
         
         base_radius = combustor_radius + expansion
         
         # Advanced flame holder section with radial vanes
-        flame_holder_pos = 0.25
-        flame_holder_length = 0.15
-        num_vanes = 6
+        flame_holder_pos = 0.20  # Moved upstream slightly
+        flame_holder_length = 0.20  # Increased length for better stabilization
+        num_vanes = 8  # Increased from 6 for better mixing
         
         # Check if we're in the flame holder section
         if flame_holder_pos <= t <= flame_holder_pos + flame_holder_length:
             local_t = (t - flame_holder_pos) / flame_holder_length
             
-            # Create V-shaped profile for better flame holding
-            v_angle = np.radians(15)
-            v_depth = 0.2
+            # Deeper V-shaped profile for better flame holding
+            v_angle = np.radians(20)  # Increased from 15
+            v_depth = 0.25  # Increased from 0.2
             v_profile = v_depth * (1 - local_t) * np.sin(np.pi * local_t)
             
-            # Add radial vane effects
+            # Enhanced radial vane effects
             vane_angle = 2 * np.pi * num_vanes * local_t
-            vane_strength = 0.08 * np.sin(vane_angle) * np.exp(-2 * (local_t - 0.5)**2)
+            vane_strength = 0.12 * np.sin(vane_angle) * np.exp(-2 * (local_t - 0.5)**2)
             
             return base_radius - v_profile + vane_strength
         
@@ -359,36 +359,28 @@ def generate_flow_path(params=None):
     def nozzle_profile(t):
         """Generate optimized bell nozzle contour with smooth entrance."""
         # Throat parameters
-        throat_pos = 0.25  # Moved throat back slightly
-        throat_radius = radius_outer * 0.6  # Slightly smaller throat
+        throat_pos = 0.20  # Moved forward slightly
+        throat_radius = radius_outer * 0.55  # Even smaller throat for higher pressure
         
         # Bell nozzle parameters
-        exit_radius = radius_outer * 0.85
-        theta_i = np.radians(25)  # Reduced initial angle for smoother transition
-        theta_e = np.radians(10)
+        exit_radius = radius_outer * 0.80  # More underexpanded for altitude performance
+        theta_i = np.radians(30)  # Back to 30° for better expansion
+        theta_e = np.radians(8)  # Reduced exit angle
         
         if t < throat_pos:
-            # Improved convergent section with smoother curve
+            # Improved convergent section
             t_conv = t/throat_pos
-            # Use quintic polynomial for smoother transition
             return combustor_radius * 0.9 + (throat_radius - combustor_radius * 0.9) * \
                    (10*t_conv**3 - 15*t_conv**4 + 6*t_conv**5)
         else:
-            # Divergent section (optimized bell contour)
             t_div = (t - throat_pos)/(1 - throat_pos)
-            
-            # Rao's method for optimized bell nozzle
             theta = theta_i * (1 - t_div)**2 + theta_e * t_div**2
+            L_ratio = 0.85  # Increased from 0.8 for better expansion
             
-            # Length ratio for optimized performance (80% of conical nozzle)
-            L_ratio = 0.8
-            
-            # Improved bell contour calculation
             r = throat_radius + (exit_radius - throat_radius) * \
                 (1.5*t_div - 0.5*t_div**3) * L_ratio
             
-            # Add wall inflection control
-            inflection = 0.05 * throat_radius * np.sin(np.pi * t_div) * (1 - t_div)
+            inflection = 0.04 * throat_radius * np.sin(np.pi * t_div) * (1 - t_div)
             
             return r + inflection
     
