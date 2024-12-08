@@ -193,13 +193,13 @@ def objective_function(params):
 def optimize_geometry():
     """Optimize geometry with improved constraints and objectives."""
     bounds = [
-        (9.8, 10.0),     # radius_inlet: unchanged
-        (8.2, 8.7),      # radius_throat: slightly larger for better mass flow
-        (9.2, 9.7),      # radius_exit: adjusted for optimal expansion
-        (35.0, 37.0),    # spike_length: unchanged
-        (10.0, 15.0),    # theta1: unchanged
-        (16.0, 20.0),    # theta2: unchanged
-        (0.15, 0.20)     # bypass_ratio: unchanged
+        (9.8, 10.0),     # radius_inlet
+        (8.2, 8.7),      # radius_throat
+        (9.0, 9.5),      # radius_exit: adjusted range for better expansion ratio
+        (35.0, 37.0),    # spike_length
+        (10.0, 15.0),    # theta1
+        (16.0, 20.0),    # theta2
+        (0.15, 0.20)     # bypass_ratio
     ]
 
     # Use differential evolution with updated settings
