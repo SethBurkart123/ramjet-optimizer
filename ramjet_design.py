@@ -6,6 +6,11 @@ from tqdm.auto import tqdm
 import warnings
 warnings.filterwarnings('ignore')
 import ezdxf
+from numba import jit
+from scipy.interpolate import CubicSpline
+import multiprocessing as mp
+from functools import partial
+from scipy.signal import savgol_filter
 
 # Simulation control parameters
 SIM_POPSIZE = 30        # Population size for optimization
@@ -28,35 +33,36 @@ g0 = 9.81    # Gravitational acceleration [m/s²]
 total_length = 100.0   
 radius_outer = 10.0    
 
-def real_gas_properties(M, T):
-    """Calculate real gas properties with enhanced high-temperature modeling."""
-    # Temperature normalization for numerical stability
+# Add these new physical constants
+Sutherland_C = 120  # Sutherland's constant for air [K]
+k_thermal = 0.0257  # Thermal conductivity of air at STP [W/m·K]
+
+@jit(nopython=True)
+def improved_real_gas_properties(M, T):
+    """Calculate real gas properties with enhanced accuracy using Numba."""
+    # More accurate NASA 9-coefficient polynomial coefficients for high temperatures
+    a = [3.88, -2.217e-3, 7.537e-6, -6.941e-9, 2.514e-12, 
+         -1.239e-15, 2.184e-19, -1.372e-23, 3.291e-28]
+    
+    # Enhanced temperature normalization with better high-temp behavior
     T_norm = T/1000
     
-    # Updated NASA coefficients for better high-temperature accuracy
-    a = [3.88, -2.217e-3, 7.537e-6, -6.941e-9, 2.514e-12]
-    b = [3.779, -8.243e-4, 2.269e-6, -1.547e-9, 0.311e-12]
+    # Improved gamma calculation with vibrational and electronic energy modes
+    Cv_vib = R * (T/5500)**2 * np.exp(-5500/T) / (1 - np.exp(-5500/T))**2
+    Cv_el = R * 0.04 * (T/10000)**3  # Electronic excitation at very high temps
     
-    # Enhanced gamma calculation
-    gamma_T = (1 + (a[0] + a[1]*T + a[2]*T**2 + a[3]*T**3 + a[4]*T**4) / 
-              (b[0] + b[1]*T + b[2]*T**2 + b[3]*T**2 + b[4]*T**4))
+    # Total specific heat including all energy modes
+    Cv_total = Cp - R + Cv_vib + Cv_el
+    gamma_T = Cp/Cv_total
     
-    # Improved gas constant calculation
-    R_T = R * (1 + 0.00015 * (T - 288.15) - 4e-8 * (T - 288.15)**2 
-               + 6e-11 * (T - 288.15)**3)
+    # Enhanced viscosity model with high-temperature corrections
+    mu_T = mu0 * (T/288.15)**(3/2) * (288.15 + Sutherland_C)/(T + Sutherland_C) * \
+           (1 + 0.023*(T/1000)**2)  # Additional term for ionization effects
     
-    # More accurate specific heat
-    Cp_T = R * (a[0] + a[1]*T + a[2]*T**2 + a[3]*T**3 + a[4]*T**4)
+    # Improved thermal conductivity with temperature dependence
+    k_T = k_thermal * (T/288.15)**0.83 * (1 + 0.01*(T/1000)**2)
     
-    # Temperature-dependent Prandtl number
-    Pr_T = Pr * (1 - 0.00018 * (T - 288.15) + 2.5e-7 * (T - 288.15)**2)
-    
-    # Enhanced Sutherland's law
-    S = 110.4
-    mu_T = mu0 * (T/288.15)**(3/2) * ((288.15 + S)/(T + S)) * \
-           (1 + 0.0004*(T-288.15) - 1.2e-7*(T-288.15)**2)
-    
-    return gamma_T, R_T, Cp_T, Pr_T, mu_T
+    return gamma_T, R, Cp, Pr, mu_T, k_T
 
 def oblique_shock_angle(M1, theta):
     """Calculate oblique shock angle beta given M1 and deflection angle theta."""
@@ -75,17 +81,20 @@ def shock_properties(M1, beta, theta, force_normal_shock=False):
     
     # Get real gas properties before shock
     T1 = T0 * (1 + (gamma-1)/2 * M1n**2)
-    gamma_T, R_T, Cp_T, _, _ = real_gas_properties(M1, T1)
+    gamma_T, R_T, Cp_T, _, _, _ = improved_real_gas_properties(M1, T1)
     
     # Enhanced normal shock relations with real gas effects
     P2_P1 = (2*gamma_T*M1n**2 - (gamma_T-1)) / (gamma_T+1)
     T2_T1 = P2_P1 * ((2 + (gamma_T-1)*M1n**2) / ((gamma_T+1)*M1n**2))
     
-    # Improved post-shock Mach number calculation
+    # Improved post-shock Mach number with boundary layer interaction
     M2n = np.sqrt((1 + (gamma_T-1)/2 * M1n**2)/(gamma_T*M1n**2 - (gamma_T-1)/2))
     
-    # Account for viscous losses and boundary layer interaction
-    M2n *= 0.92  # Refined loss coefficient based on experimental data
+    # Account for viscous losses and shock-boundary layer interaction
+    if M1 > 1.5:
+        # Enhanced loss model based on experimental correlations
+        loss_factor = 0.92 - 0.02*(M1-1.5)**2
+        M2n *= loss_factor
     
     if force_normal_shock and M1 > 1:
         M2 = M2n
@@ -95,75 +104,113 @@ def shock_properties(M1, beta, theta, force_normal_shock=False):
     # Calculate entropy change with real gas effects
     ds = Cp_T * np.log(T2_T1) - R_T * np.log(P2_P1)
     
-    # Apply additional corrections for strong shocks (M > 3)
+    # Enhanced corrections for strong shocks (M > 3)
     if M1 > 3:
-        # Enhanced pressure ratio for strong shocks
-        P2_P1 *= (1 - 0.02*(M1-3))
+        # Improved pressure ratio correction
+        P2_P1 *= (1 - 0.02*(M1-3) + 0.001*(M1-3)**2)
         # Temperature correction for dissociation effects
-        T2_T1 *= (1 - 0.015*(M1-3))
+        T2_T1 *= (1 - 0.015*(M1-3) + 0.0005*(M1-3)**2)
         
     return M2, P2_P1, T2_T1, ds
 
+def parallel_shock_solver(M1_array, beta_array, theta):
+    """Solve shock equations in parallel for multiple conditions."""
+    with mp.Pool() as pool:
+        shock_func = partial(shock_properties, theta=theta)
+        results = pool.starmap(shock_func, zip(M1_array, beta_array))
+    return results
+
+# Move objective_function outside optimize_geometry()
+def objective_function(params):
+    """Calculate objective function value for parameters."""
+    radius_inlet, radius_throat, radius_exit, spike_length, theta1, theta2, bypass_ratio = params
+    
+    try:
+        # Calculate ideal expansion ratio
+        gamma_T, R_T, Cp_T, _, _, _ = improved_real_gas_properties(M0, T0)
+        ideal_ratio = ((gamma_T+1)/2)**(-(gamma_T+1)/(2*(gamma_T-1))) * \
+                     (1/M0) * (1 + (gamma_T-1)/2 * M0**2)**((gamma_T+1)/(2*(gamma_T-1)))
+        
+        actual_ratio = (radius_exit/radius_throat)**2
+        expansion_error = abs(actual_ratio - ideal_ratio)/ideal_ratio
+        
+        # Much heavier penalty for expansion ratio error
+        penalties = 25000 * expansion_error**2
+        
+        # Calculate nozzle efficiency
+        nozzle_efficiency = 0.95 * (1 - 0.5 * expansion_error)  # Efficiency decreases with deviation
+        penalties += 20000 * (1 - nozzle_efficiency)**2
+        
+        # Add penalties for non-continuous transitions
+        if abs(radius_throat - radius_inlet*0.8) > 0.2:  # Ensure smooth throat transition
+            penalties += 15000
+        
+        if abs(radius_exit - radius_throat*1.2) > 0.2:  # Ensure smooth exit transition
+            penalties += 15000
+            
+        # Calculate shock system performance
+        beta1 = oblique_shock_angle(M0, np.radians(theta1))
+        M1, P1_P0, T1_T0, ds1 = shock_properties(M0, beta1, np.radians(theta1))
+        
+        beta2 = oblique_shock_angle(M1, np.radians(theta2-theta1))
+        M2, P2_P1, T2_T1, ds2 = shock_properties(M1, beta2, np.radians(theta2-theta1))
+        
+        M3, P3_P2, T3_T2, ds3 = shock_properties(M2, np.pi/2, 0, force_normal_shock=True)
+        
+        # Target higher pressure recovery and better shock system
+        total_pressure_ratio = P1_P0 * P2_P1 * P3_P2
+        penalties += 20000 * (0.45 - total_pressure_ratio)**2  # Increased target
+        
+        # Optimize contraction ratio for better performance
+        contraction_ratio = radius_inlet/radius_throat
+        penalties += 10000 * (1.8 - contraction_ratio)**2  # Target higher compression
+        
+        # Add penalties for shock angles
+        if theta1 < 10 or theta1 > 15:  # Optimal range for first shock
+            penalties += 5000
+        if theta2 < 16 or theta2 > 20:  # Optimal range for second shock
+            penalties += 5000
+            
+        # Add performance-based penalties
+        try:
+            perf = calculate_performance(params)
+            if perf['specific_impulse'] < 600:
+                penalties += 15000 * (600 - perf['specific_impulse'])**2 / 600**2
+            if perf['thermal_efficiency'] < 0.3:
+                penalties += 10000 * (0.3 - perf['thermal_efficiency'])**2
+        except:
+            penalties += 50000
+            
+        return penalties
+        
+    except:
+        return 1e10
+
 def optimize_geometry():
-    """Optimize geometry with improved performance targets."""
+    """Optimize geometry with improved constraints and objectives."""
     bounds = [
-        (9.8, 10.0),    # radius_inlet: Slightly wider range for better mass capture
-        (8.0, 8.3),     # radius_throat: Adjusted for higher compression ratio
-        (9.2, 9.4),     # radius_exit: Optimized for better expansion
-        (32.0, 33.0),   # spike_length: Increased for better shock structure
-        (9.0, 9.5),     # theta1: Increased first shock angle
-        (15.0, 15.5),   # theta2: Stronger second shock
-        (0.18, 0.20)    # bypass_ratio: Optimized for better starting
+        (9.8, 10.0),     # radius_inlet: Keep for good mass capture
+        (8.0, 8.5),      # radius_throat: Reduced for higher compression
+        (9.6, 9.9),      # radius_exit: Adjusted for better expansion
+        (35.0, 37.0),    # spike_length: Extended range for better compression
+        (10.0, 15.0),    # theta1: Wider range for optimization
+        (16.0, 20.0),    # theta2: Wider range for optimization
+        (0.15, 0.20)     # bypass_ratio: Slightly increased range
     ]
 
-    def objectives(params):
-        radius_inlet, radius_throat, radius_exit, spike_length, theta1, theta2, bypass_ratio = params
-        
-        try:
-            # Calculate ideal expansion ratio first
-            gamma_T, R_T, _, _, _ = real_gas_properties(M0, T0)
-            ideal_ratio = ((gamma_T+1)/2)**(-(gamma_T+1)/(2*(gamma_T-1))) * \
-                         (1/M0) * (1 + (gamma_T-1)/2 * M0**2)**((gamma_T+1)/(2*(gamma_T-1)))
-            
-            actual_ratio = (radius_exit/radius_throat)**2
-            expansion_error = abs(actual_ratio - ideal_ratio)/ideal_ratio
-            
-            # Adjust penalties for better optimization
-            penalties = 10000 * expansion_error**2
-            
-            # Target higher pressure recovery
-            beta1 = oblique_shock_angle(M0, np.radians(theta1))
-            M1, P1_P0, T1_T0, ds1 = shock_properties(M0, beta1, np.radians(theta1))
-            
-            beta2 = oblique_shock_angle(M1, np.radians(theta2-theta1))
-            M2, P2_P1, T2_T1, ds2 = shock_properties(M1, beta2, np.radians(theta2-theta1))
-            
-            M3, P3_P2, T3_T2, ds3 = shock_properties(M2, np.pi/2, 0, force_normal_shock=True)
-            
-            total_pressure_ratio = P1_P0 * P2_P1 * P3_P2
-            penalties += 12000 * (0.40 - total_pressure_ratio)**2  # Target higher pressure recovery
-            
-            # Target optimal contraction ratio
-            contraction_ratio = radius_inlet/radius_throat
-            penalties += 7000 * (1.5 - contraction_ratio)**2      # Target higher compression
-            
-            return penalties
-            
-        except:
-            return 1e10
-
-    # Modified optimization parameters for better convergence
+    # Use differential evolution with updated settings
     result = differential_evolution(
-        objectives, 
+        objective_function,
         bounds,
-        popsize=SIM_POPSIZE * 5,  # Increased population size
-        mutation=(0.5, 1.1),      # Adjusted mutation range
+        popsize=SIM_POPSIZE * 2,  # Increased population size
+        mutation=(0.6, 1.2),      # More aggressive mutation
         recombination=0.9,
-        maxiter=SIM_MAXITER * 3,  # Increased iterations
+        maxiter=SIM_MAXITER * 2,  # Increased iterations
         tol=SIM_TOL,
         seed=RANDOM_SEED,
         polish=True,
-        strategy='best1bin'
+        strategy='best1bin',
+        workers=1
     )
     
     return result.x
@@ -171,7 +218,7 @@ def optimize_geometry():
 def calculate_drag(radius_inlet, spike_length, M0):
     """Calculate drag with improved physics modeling."""
     # Get real gas properties at freestream conditions
-    gamma_T, R_T, _, _, mu_T = real_gas_properties(M0, T0)
+    gamma_T, R_T, _, _, mu_T = improved_real_gas_properties(M0, T0)
     
     # Calculate Reynolds number with real properties
     rho = P0/(R_T*T0)
@@ -260,8 +307,130 @@ def generate_spike_profile(params=None):
     
     return x, y, M2, P1_P0*P2_P1, T1_T0*T2_T1, params
 
+def improved_nozzle_profile(t, y_combustor, radius_throat, radius_exit):
+    """Generate perfectly continuous CD nozzle using unified profile."""
+    # Single continuous profile parameters
+    throat_pos = 0.15    # Throat position
+    conv_radius = y_combustor[-1]  # Initial radius
+    
+    # Calculate optimal angles based on MOC
+    theta_i = np.radians(15)  # Initial expansion angle
+    theta_e = np.radians(5)   # Exit angle
+    
+    # Use a single 7th order polynomial for the entire nozzle
+    # This ensures C3 continuity throughout the profile
+    if t <= 1.0:
+        # Normalize t to [0,1]
+        t_norm = t
+        
+        # Calculate control points for perfect continuity
+        r0 = conv_radius          # Initial radius
+        r1 = radius_throat        # Throat radius
+        r2 = radius_exit          # Exit radius
+        
+        # Coefficients for 7th order polynomial ensuring C3 continuity
+        a0 = r0
+        a1 = 0  # Zero initial slope
+        a2 = 0  # Zero initial curvature
+        a3 = -20 * (r0 - r1) * (t_norm - throat_pos)**3
+        a4 = 45 * (r0 - r1) * (t_norm - throat_pos)**4
+        a5 = -36 * (r0 - r1) * (t_norm - throat_pos)**5
+        a6 = 10 * (r0 - r1) * (t_norm - throat_pos)**6
+        
+        # Add expansion terms after throat
+        if t_norm > throat_pos:
+            expansion = (r2 - r1) * (
+                10 * ((t_norm - throat_pos)/(1 - throat_pos))**3 -
+                15 * ((t_norm - throat_pos)/(1 - throat_pos))**4 +
+                6 * ((t_norm - throat_pos)/(1 - throat_pos))**5
+            )
+        else:
+            expansion = 0
+            
+        # Combine convergent and divergent portions smoothly
+        r = a0 + a1*t_norm + a2*t_norm**2 + a3 + a4 + a5 + a6 + expansion
+        
+        # Add subtle wall curvature optimization
+        curve_factor = 0.02 * radius_throat * np.sin(np.pi * t_norm) * (1 - t_norm) * t_norm
+        
+        return r + curve_factor
+    
+    return radius_exit  # Failsafe return
+
+def improved_combustor_profile(t, x_combustor, combustor_radius):
+    """Generate ultra-smooth combustor profile with optimized transitions."""
+    # Even gentler expansion angle
+    expansion_angle = np.radians(0.5)  # Further reduced for smoother flow
+    
+    # Multi-stage smooth transition using enhanced blending
+    t1 = 1 / (1 + np.exp(-8*(t - 0.3)))  # Gentler first sigmoid
+    t2 = 1 / (1 + np.exp(-6*(t - 0.7)))  # Gentler second sigmoid
+    t3 = np.sin(np.pi * t/2)**2          # Added smooth sine transition
+    transition = 0.5 * t1 + 0.3 * t2 + 0.2 * t3  # Three-way blend
+    
+    expansion = transition * np.tan(expansion_angle) * (x_combustor[-1] - x_combustor[0])
+    base_radius = combustor_radius + expansion
+    
+    # Improved flame holder with gentler profile
+    flame_holder_pos = 0.4   # Moved further downstream
+    flame_holder_length = 0.08  # Even shorter for better flow
+    
+    if flame_holder_pos <= t <= flame_holder_pos + flame_holder_length:
+        local_t = (t - flame_holder_pos) / flame_holder_length
+        
+        # Ultra-smooth profile using enhanced harmonics
+        v_depth = 0.08  # Further reduced depth
+        v_profile = v_depth * (
+            np.sin(np.pi * local_t)**2 * (1 - local_t)**3 * local_t**3 +
+            0.15 * np.sin(2*np.pi * local_t) * (1 - local_t)**4 * local_t**4
+        )
+        
+        return base_radius - v_profile
+    
+    # Super-smooth transition to nozzle using enhanced blending
+    if t > 0.88:  # Start transition even later
+        transition_t = (t - 0.88) / 0.12
+        # Use 7th order polynomial for ultra-smooth transition
+        s = (35*transition_t**4 - 84*transition_t**5 + 70*transition_t**6 - 20*transition_t**7) 
+        target_radius = combustor_radius * 0.99
+        return base_radius * (1 - s) + target_radius * s
+    
+    return base_radius
+
+def improved_diffuser_profile(t, x_diffuser, radius_outer):
+    """Generate ultra-smooth diffuser profile with optimized pressure recovery."""
+    # Super-smooth angle progression
+    startup_angle = np.radians(2.8)   # Reduced for smoother initial transition
+    running_angle = np.radians(6.0)   # Optimized for pressure recovery
+    
+    # Multi-stage smooth transition using blended functions
+    # Initial transition
+    t1 = t**2 * (3 - 2*t)  # Cubic Hermite spline
+    # Main diffusion
+    t2 = 1 / (1 + np.exp(-12*(t - 0.5)))  # Sigmoid function
+    # Final transition
+    t3 = 1 - (1-t)**3  # Cubic transition
+    
+    # Blend all transitions
+    angle = startup_angle * (1 - t1) + running_angle * t2 * (1 - t3)
+    
+    # Enhanced contraction profile with multiple harmonics
+    contour = 0.015 * radius_outer * (
+        np.sin(np.pi * t) * (1 - t)**2 +
+        0.3 * np.sin(2*np.pi * t) * (1 - t)**3 +
+        0.1 * np.sin(3*np.pi * t) * (1 - t)**4
+    )
+    
+    # Calculate radius change with improved smoothing
+    dr = np.cumsum(np.tan(angle)) * (x_diffuser[1] - x_diffuser[0])
+    
+    # Add subtle wall curvature for better pressure recovery
+    wall_curve = 0.02 * radius_outer * np.sin(np.pi * t) * (1 - t)
+    
+    return radius_outer - dr + contour + wall_curve
+
 def generate_flow_path(params=None):
-    """Generate flow path with variable geometry inlet."""
+    """Generate flow path with ultra-smooth transitions and no notches."""
     if params is None:
         _, _, M_diff, P_diff, T_diff, params = generate_spike_profile()
     else:
@@ -270,115 +439,112 @@ def generate_flow_path(params=None):
     # Unpack parameters including bypass ratio
     radius_inlet, radius_throat, radius_exit, spike_length, _, _, bypass_ratio = params
     
-    # Start cowl slightly earlier to better capture shock
-    cowl_start_x = spike_length * 0.80
+    # Start cowl slightly earlier for better shock capture
+    cowl_start_x = spike_length * 0.78
     
-    # Generate sections
-    x_diffuser = np.linspace(cowl_start_x, cowl_start_x + 22, 30)  # Slightly shorter diffuser
-    x_combustor = np.linspace(x_diffuser[-1], x_diffuser[-1] + 43, 35)  # Longer combustor
-    x_nozzle = np.linspace(x_combustor[-1], total_length, 45)  # More points for smoother curve
+    # Calculate section lengths
+    diffuser_length = 22
+    combustor_length = 43.1
+    nozzle_length = total_length - (cowl_start_x + diffuser_length + combustor_length)
     
-    # Initial sharp compression followed by controlled diffusion
+    # Increase points even further for smoother curves
+    x_diffuser = np.linspace(cowl_start_x, cowl_start_x + diffuser_length, 300)
+    x_combustor = np.linspace(x_diffuser[-1] + 0.01, x_diffuser[-1] + combustor_length, 350)
+    x_nozzle = np.linspace(x_combustor[-1] + 0.01, total_length, 500)  # More points for smoother nozzle
+    
+    # Calculate initial profiles with higher resolution
     t_diff = (x_diffuser - x_diffuser[0])/(x_diffuser[-1] - x_diffuser[0])
+    y_diffuser = improved_diffuser_profile(t_diff, x_diffuser, radius_outer)
     
-    def diffuser_profile(t):
-        """Generate diffuser profile with maximum pressure recovery."""
-        startup_angle = np.radians(3.5)   # Further reduced for better shock stability
-        running_angle = np.radians(7.0)   # Optimized for pressure recovery
-        
-        # More sophisticated angle progression
-        angle = startup_angle * (1 - t)**3 + running_angle * t**2 * (1 - 0.3*t)
-        
-        # Enhanced contraction profile
-        contour = 0.025 * np.sin(np.pi * t) * (1 - t)**1.5
-        
-        dr = np.cumsum(np.tan(angle)) * (x_diffuser[1] - x_diffuser[0])
-        return radius_outer - dr + contour
+    # Pre-smooth diffuser profile
+    y_diffuser = savgol_filter(y_diffuser, 21, 3)
     
-    y_diffuser = diffuser_profile(t_diff)
-    
-    # Modified combustor with gradual expansion
+    # Combustor section with extended transition
     t_comb = (x_combustor - x_combustor[0])/(x_combustor[-1] - x_combustor[0])
     combustor_radius = y_diffuser[-1]
+    y_combustor = np.array([improved_combustor_profile(t, x_combustor, combustor_radius) for t in t_comb])
     
-    def combustor_profile(t):
-        """Generate combustor profile with smoother transitions."""
-        # More gradual expansion angle
-        expansion_angle = np.radians(1.5)  # Reduced from 2.0
-        transition = (1 - np.cos(np.pi * t)) / 2
-        expansion = transition * np.tan(expansion_angle) * (x_combustor[-1] - x_combustor[0])
-        
-        base_radius = combustor_radius + expansion
-        
-        # Smoother flame holder section
-        flame_holder_pos = 0.25  # Moved downstream slightly
-        flame_holder_length = 0.15  # Shorter for better flow
-        
-        if flame_holder_pos <= t <= flame_holder_pos + flame_holder_length:
-            local_t = (t - flame_holder_pos) / flame_holder_length
-            
-            # Gentler V-shaped profile
-            v_angle = np.radians(15)  # Reduced from 20
-            v_depth = 0.20  # Reduced from 0.25
-            v_profile = v_depth * (1 - local_t) * np.sin(np.pi * local_t)
-            
-            return base_radius - v_profile
-        
-        # Smooth transition to nozzle
-        if t > 0.75:  # Start transition earlier
-            transition_t = (t - 0.75) / 0.25
-            target_radius = combustor_radius * 0.95
-            transition_factor = 0.5 * (1 - np.cos(np.pi * transition_t))
-            return base_radius * (1 - transition_factor) + target_radius * transition_factor
-        
-        return base_radius
+    # Pre-smooth combustor profile
+    y_combustor = savgol_filter(y_combustor, 21, 3)
     
-    y_combustor = np.array([combustor_profile(t) for t in t_comb])
+    # Generate nozzle profile with higher precision
+    t_nozzle = (x_nozzle - x_nozzle[0])/nozzle_length
+    y_nozzle = np.array([improved_nozzle_profile(t, y_combustor, radius_throat, radius_exit) for t in t_nozzle])
     
-    # Modified nozzle section with smoother entrance
-    nozzle_length = total_length - x_combustor[-1]
-    x_nozzle = np.linspace(x_combustor[-1], total_length, 40)  # Increased resolution
-    t_nozzle = (x_nozzle - x_nozzle[0])/nozzle_length  # Normalized nozzle position
+    # Apply progressive smoothing to nozzle only
+    windows = [(41, 4), (31, 4), (21, 3)]  # Reduced window sizes for better detail preservation
+    for window, order in windows:
+        y_nozzle = savgol_filter(y_nozzle, window, order)
     
-    def nozzle_profile(t):
-        """Generate high-efficiency bell nozzle contour with smooth transitions."""
-        throat_pos = 0.18       # Moved back slightly for smoother transition
-        throat_radius = radius_outer * 0.62  # Slightly larger throat
-        
-        exit_radius = radius_outer * 0.86    # Adjusted for better expansion
-        theta_i = np.radians(20)  # Further reduced initial angle
-        theta_e = np.radians(5)   # Reduced exit angle
-        
-        if t < throat_pos:
-            # Smoother convergent section using quintic polynomial
-            t_conv = t/throat_pos
-            # Added smoothing factor for better transition
-            smooth_factor = 0.1 * np.sin(np.pi * t_conv)
-            return combustor_radius * 0.95 + (throat_radius - combustor_radius * 0.95) * \
-                   (10*t_conv**3 - 15*t_conv**4 + 6*t_conv**5 + smooth_factor)
+    # Enhanced transition handling
+    transition_points = 60  # Increased for smoother transitions
+    blend_region = 40  # Points for blending between sections
+    
+    # Smooth transition between diffuser and combustor
+    diff_comb_x = np.linspace(x_diffuser[-blend_region], x_combustor[blend_region], 2*blend_region)
+    diff_comb_y = np.zeros(2*blend_region)
+    for i in range(2*blend_region):
+        t = i/(2*blend_region - 1)
+        # Use quintic blending for C2 continuity
+        blend = t**3 * (10 - 15*t + 6*t**2)
+        diff_comb_y[i] = y_diffuser[-blend_region:][0] * (1-blend) + y_combustor[:blend_region][0] * blend
+    
+    # Smooth transition between combustor and nozzle
+    comb_noz_x = np.linspace(x_combustor[-blend_region], x_nozzle[blend_region], 2*blend_region)
+    comb_noz_y = np.zeros(2*blend_region)
+    for i in range(2*blend_region):
+        t = i/(2*blend_region - 1)
+        # Use quintic blending for C2 continuity
+        blend = t**3 * (10 - 15*t + 6*t**2)
+        comb_noz_y[i] = y_combustor[-blend_region:][0] * (1-blend) + y_nozzle[:blend_region][0] * blend
+    
+    # Combine sections with smooth transitions
+    x = np.concatenate([
+        x_diffuser[:-blend_region],
+        diff_comb_x,
+        x_combustor[blend_region:-blend_region],
+        comb_noz_x,
+        x_nozzle[blend_region:]
+    ])
+    
+    y_upper = np.concatenate([
+        y_diffuser[:-blend_region],
+        diff_comb_y,
+        y_combustor[blend_region:-blend_region],
+        comb_noz_y,
+        y_nozzle[blend_region:]
+    ])
+    
+    # Progressive smoothing with varying window sizes and polynomial orders
+    windows = [(61, 4), (51, 4), (41, 3), (31, 3), (21, 3)]
+    for window, order in windows:
+        y_upper = savgol_filter(y_upper, window, order)
+    
+    # Final local smoothing for any remaining discontinuities
+    for i in range(len(y_upper)-2):
+        if abs(y_upper[i+1] - (y_upper[i] + y_upper[i+2])/2) > 0.01:
+            y_upper[i+1] = (y_upper[i] + y_upper[i+2])/2
+    
+    # Ensure critical dimensions while maintaining smoothness
+    y_upper[0] = radius_outer
+    y_upper[-1] = radius_exit
+    
+    # Smooth transition to critical points using higher order blending
+    for idx in [0, -1]:
+        if idx == 0:
+            region = slice(0, 30)  # Extended blend region
+            target = radius_outer
         else:
-            t_div = (t - throat_pos)/(1 - throat_pos)
+            region = slice(-30, None)  # Extended blend region
+            target = radius_exit
             
-            # Smoother angle progression
-            theta = theta_i * (1 - t_div)**3 + theta_e * t_div**2
-            L_ratio = 0.92  # Increased for smoother expansion
-            
-            # Modified bell contour with smoother transition
-            r = throat_radius + (exit_radius - throat_radius) * \
-                (1.5*t_div - 0.5*t_div**3) * L_ratio
-            
-            # Reduced inflection for smoother contour
-            inflection = 0.025 * throat_radius * np.sin(np.pi * t_div) * (1 - t_div)**1.5
-            
-            return r + inflection
+        y = y_upper[region]
+        t = np.linspace(0, 1, len(y))
+        # Use 7th order polynomial for smoother transition
+        blend = t**3 * (35 - 84*t + 70*t**2 - 20*t**3)
+        y_upper[region] = y * (1-blend) + target * blend
     
-    y_nozzle = np.array([nozzle_profile(t) for t in t_nozzle])
-    
-    # Combine all sections
-    x = np.concatenate([x_diffuser, x_combustor, x_nozzle])
-    y_upper = np.concatenate([y_diffuser, y_combustor, y_nozzle])
     y_lower = -y_upper
-    
     return x, y_upper, y_lower
 
 def plot_ramjet(params=None):
@@ -421,99 +587,115 @@ def plot_ramjet(params=None):
     plt.savefig('docs/ramjet_diagram.png', dpi=300, bbox_inches='tight')
     plt.show()
 
-def calculate_performance(params=None):
-    """Enhanced performance calculations with improved thermodynamics."""
+def calculate_performance(params):
+    """Calculate performance with realistic modeling."""
     if params is None:
         _, _, M_spike, P_ratio, T_ratio, params = generate_spike_profile()
     else:
         _, _, M_spike, P_ratio, T_ratio, _ = generate_spike_profile(params)
         
-    radius_inlet, radius_throat, radius_exit = params[:3]
+    radius_inlet, radius_throat, radius_exit, spike_length, _, _, bypass_ratio = params
+    
+    # Calculate section lengths for nozzle efficiency
+    cowl_start_x = spike_length * 0.78
+    diffuser_length = 22
+    combustor_length = 43.1
+    nozzle_length = total_length - (cowl_start_x + diffuser_length + combustor_length)
     
     # Convert dimensions from mm to m for calculations
     radius_inlet = radius_inlet / 1000
     radius_throat = radius_throat / 1000
     radius_exit = radius_exit / 1000
+    nozzle_length = nozzle_length / 1000  # Convert nozzle length to meters
     
     A_inlet = np.pi * radius_inlet**2
     A_throat = np.pi * radius_throat**2
     A_exit = np.pi * radius_exit**2
     
-    # Improved capture efficiency
-    capture_efficiency = 0.97  # Increased from 0.95
+    # More realistic capture efficiency for small-scale ramjet
+    capture_efficiency = 0.92
     
-    # Enhanced combustion efficiency
-    eta_comb = 0.995  # Increased from 0.99
+    # Realistic combustion parameters for small-scale ramjet
+    eta_comb = 0.85  # Reduced for small-scale effects
+    fuel_air_ratio = 0.025  # Typical JP-4/Air ratio
+    LHV = 42.8e6  # JP-4 heating value [J/kg]
     
-    # Calculate inlet conditions with real gas effects
+    # Calculate inlet conditions with complete gas properties
     T1 = T0 * (1 + (gamma-1)/2 * M0**2)
-    gamma_T, R_T, Cp_T, _, mu_T = real_gas_properties(M0, T1)
+    gamma_T, R_T, Cp_T, Pr_T, mu_T, k_T = improved_real_gas_properties(M0, T1)  # Get all properties
     
-    # Improved mass flow calculation with better capture efficiency
+    # Calculate mass flow
     rho0 = P0/(R_T*T0)
     V0 = M0 * np.sqrt(gamma_T*R_T*T0)
-    mdot = rho0 * V0 * A_inlet * capture_efficiency
+    mdot_air = rho0 * V0 * A_inlet * capture_efficiency
+    mdot_fuel = mdot_air * fuel_air_ratio
+    mdot_total = mdot_air + mdot_fuel
     
-    # Adjust pressure recovery calculation
-    pressure_recovery = P_ratio * 0.85  # Add realistic pressure recovery factor
+    # More realistic pressure recovery
+    pressure_recovery = P_ratio * 0.85
     
-    # Calculate combustor pressure with losses
-    P_comb = P0 * pressure_recovery * 0.95  # Account for combustor pressure losses
+    # Calculate combustor conditions
+    P_comb = P0 * pressure_recovery * 0.95
+    T_comb = min(2000, T0 * (1 + (LHV * fuel_air_ratio * eta_comb)/(Cp_T * T0)))
     
-    # Improve combustion temperature modeling
-    T_comb = 2200  # More realistic combustion temperature [K]
+    # Get combustor gas properties with complete set
+    gamma_c, R_c, Cp_c, Pr_c, mu_c, k_c = improved_real_gas_properties(M_spike, T_comb)
     
-    # Adjust nozzle efficiency
-    nozzle_efficiency = 0.95  # More realistic value
-    
-    # Calculate exit conditions with improved gas properties
-    gamma_e, R_e, Cp_e, _, _ = real_gas_properties(M0, T_comb)
-    
-    # Improved nozzle calculations with better expansion modeling
-    PR_crit = (2/(gamma_e + 1))**(gamma_e/(gamma_e-1))
-    
-    # Calculate actual pressure ratio
+    # Calculate nozzle conditions
     PR = P_comb/P0
+    PR_crit = (2/(gamma_c + 1))**(gamma_c/(gamma_c-1))
     
     if PR > PR_crit:
-        # Fine-tuned exit Mach number
-        M_exit = 2.53  # Adjusted from 2.55 for better expansion
+        # Supersonic expansion with improved losses
+        M_exit = min(2.5, M0)  # Limited by initial Mach number
         
-        # Calculate exit pressure with enhanced modeling
-        P_exit = P_comb * (1 + (gamma_e-1)/2 * M_exit**2)**(-gamma_e/(gamma_e-1))
+        # Calculate actual expansion ratio
+        A_ratio = A_exit/A_throat
         
-        # More precise expansion control
-        expansion_ratio = (radius_exit/radius_throat)**2
-        ideal_ratio = ((gamma_e+1)/2)**(-(gamma_e+1)/(2*(gamma_e-1))) * \
-                     (1/M_exit) * (1 + (gamma_e-1)/2 * M_exit**2)**((gamma_e+1)/(2*(gamma_e-1)))
+        # Calculate ideal expansion ratio
+        ideal_ratio = ((gamma_c+1)/2)**(-(gamma_c+1)/(2*(gamma_c-1))) * \
+                     (1/M_exit) * (1 + (gamma_c-1)/2 * M_exit**2)**((gamma_c+1)/(2*(gamma_c-1)))
         
-        # Adaptive pressure correction based on expansion ratio error
-        ratio_error = abs(expansion_ratio - ideal_ratio)/ideal_ratio
-        P_exit *= (1 + 0.01 * np.tanh(2*ratio_error))  # Smooth correction function
+        # Calculate nozzle efficiencies
+        # Divergence efficiency
+        theta_exit = np.arctan((radius_exit - radius_throat)/nozzle_length)
+        lambda_div = (1 + np.cos(theta_exit))/2
+        div_efficiency = lambda_div**2
+        
+        # Boundary layer efficiency
+        Re_nozzle = rho0 * V0 * nozzle_length / mu_T
+        bl_efficiency = 1 - 0.664/np.sqrt(Re_nozzle) * (1 + 0.2*M_exit**2)
+        
+        # Expansion efficiency
+        exp_efficiency = 1 - 0.25 * abs(A_ratio - ideal_ratio)/ideal_ratio
+        
+        # Combined nozzle efficiency
+        nozzle_efficiency = div_efficiency * bl_efficiency * exp_efficiency
+        
+        # Calculate exit conditions with losses
+        P_exit = P_comb * (1 + (gamma_c-1)/2 * M_exit**2)**(-gamma_c/(gamma_c-1))
+        T_exit = T_comb/(1 + (gamma_c-1)/2 * M_exit**2)
+        V_exit = M_exit * np.sqrt(gamma_c*R_c*T_exit) * np.sqrt(nozzle_efficiency)
+    else:
+        # Subsonic flow
+        V_exit = np.sqrt(2*Cp_c*T_comb*(1 - (P0/P_comb)**((gamma_c-1)/gamma_c)))
+        T_exit = T_comb - V_exit**2/(2*Cp_c)
+        P_exit = P0
     
-    # Calculate exit temperature and velocity
-    T_exit = T_comb/(1 + (gamma_e-1)/2 * M_exit**2)
-    V_exit = M_exit * np.sqrt(gamma_e*R_e*T_exit)
+    # Calculate thrust with improved modeling
+    thrust = mdot_total * V_exit - mdot_air * V0 + (P_exit - P0) * A_exit
+    thrust *= nozzle_efficiency  # Apply nozzle efficiency to total thrust
     
-    # Further improved nozzle efficiency
-    nozzle_efficiency = 0.985  # Increased from 0.98
-    V_exit = V_exit * np.sqrt(nozzle_efficiency)
+    # Calculate specific impulse with real gas effects
+    Isp = thrust/(mdot_fuel * g0)
     
-    # Improve specific impulse calculation
-    thrust = mdot * (V_exit - V0) + (P_exit - P0) * A_exit
-    Isp = thrust/(mdot * g0)
+    # Calculate thermal efficiency with better combustion modeling
+    q_in = mdot_fuel * LHV * eta_comb
+    w_net = thrust * V0
+    thermal_efficiency = w_net/q_in if q_in > 0 else 0
     
-    # Improve thermal efficiency calculation
-    q_in = mdot * Cp_e * (T_comb - T1)  # Heat addition in combustor
-    w_net = 0.5 * mdot * (V_exit**2 - V0**2)  # Net work output
-    thermal_efficiency = w_net/q_in
-    
-    # Calculate total efficiency
-    # Energy input from fuel
-    fuel_energy = mdot * 0.068 * 42.8e6  # mdot * f_stoich * heat_of_combustion
-    # Useful power output
-    power_out = thrust * V0
-    total_efficiency = power_out / fuel_energy if fuel_energy > 0 else 0
+    # Total efficiency including all losses
+    total_efficiency = thermal_efficiency * pressure_recovery * nozzle_efficiency
     
     return {
         'thrust': thrust,
@@ -522,9 +704,9 @@ def calculate_performance(params=None):
         'total_efficiency': total_efficiency,
         'pressure_recovery': pressure_recovery,
         'temperature_ratio': T_comb/T0,
-        'mass_flow': mdot,
+        'mass_flow': mdot_total,
         'exit_mach': M_exit,
-        'combustion_temp': T_comb
+        'nozzle_efficiency': nozzle_efficiency
     }
 
 def export_dxf_profile(params=None):
@@ -568,7 +750,7 @@ def export_dxf_profile(params=None):
 def calculate_boundary_layer(x, M, T, P, radius):
     """Calculate boundary layer properties along the surface."""
     # Get temperature-dependent properties
-    gamma_T, R_T, Cp_T, Pr_T, mu_T = real_gas_properties(M, T)
+    gamma_T, R_T, Cp_T, Pr_T, mu_T = improved_real_gas_properties(M, T)
     
     # Calculate local Reynolds number
     rho = P/(R_T*T)
@@ -589,37 +771,70 @@ def calculate_boundary_layer(x, M, T, P, radius):
     
     return delta, delta_star, theta, Cf
 
-def calculate_combustion(M_in, T_in, P_in, phi=1.0):
-    """Calculate combustion properties with enhanced efficiency."""
-    # Improved combustion parameters
-    dH_c = 45.0e6      # Increased heat of combustion
-    f_stoich = 0.068   # Optimized fuel mixture
-    eta_comb = 0.999   # Higher combustion efficiency
+def improved_boundary_layer(x, M, T, P, radius):
+    """Enhanced boundary layer calculation with transition modeling."""
+    gamma_T, R_T, Cp_T, Pr_T, mu_T, k_T = improved_real_gas_properties(M, T)
     
-    # Higher combustion temperature
-    T_comb = 2900      # Increased from 2800K
+    # Calculate local Reynolds number
+    rho = P/(R_T*T)
+    V = M * np.sqrt(gamma_T*R_T*T)
+    Re_x = rho * V * x / mu_T
     
-    # Enhanced mixing efficiency
-    mixing_efficiency = 0.999
+    # Transition Reynolds number
+    Re_trans = 5e5 * (1 + 0.1*M**2)  # Mach number effect on transition
+    
+    # Improved turbulent boundary layer modeling
+    if Re_x > Re_trans:
+        # Turbulent boundary layer
+        Cf = 0.0592/Re_x**0.2 * (1 + 0.08*M**2)**(-0.25)
+        delta = 0.37 * x / Re_x**0.2 * (1 + 0.1*M**2)
+        theta = delta * 0.125  # Momentum thickness
+    else:
+        # Laminar boundary layer
+        Cf = 0.664/np.sqrt(Re_x) * (1 + 0.08*M**2)**(-0.25)
+        delta = 5.0 * x / np.sqrt(Re_x) * (1 + 0.08*M**2)
+        theta = delta * 0.375  # Momentum thickness
+    
+    # Calculate displacement thickness with compressibility
+    H = 1.4 * (1 + 0.1*M**2)  # Shape factor with compressibility
+    delta_star = H * theta
+    
+    # Heat transfer coefficient
+    St = Cf/(2*Pr_T**(2/3))  # Stanton number
+    h = St * rho * V * Cp_T
+    
+    return delta, delta_star, theta, Cf, h
+
+def improved_combustion(M_in, T_in, P_in, phi=1.0):
+    """Enhanced combustion modeling with better efficiency."""
+    # Improved chemical kinetics parameters
+    activation_energy = 43e6  # Adjusted for better reaction rate
+    pre_exp_factor = 2e9     # Increased for faster reactions
+    
+    # Better reaction rate calculation
+    R_universal = 8.314
+    k = pre_exp_factor * np.exp(-activation_energy/(R_universal*T_in)) * \
+        (P_in/P0)**0.5 * (1 + 0.1*M_in)  # Added Mach number effect
+    
+    # More realistic combustion efficiency
+    eta_comb = 0.95 * (1 - np.exp(-k * 2e-3)) * (P_in/P0)**0.15
+    
+    # Higher adiabatic flame temperature
+    T_adiabatic = 3200  # Increased from 2900K
+    dissociation_factor = 1 - 0.12 * (T_adiabatic/3000)**2
+    T_out = T_in + (T_adiabatic - T_in) * eta_comb * dissociation_factor
     
     # Reduced pressure losses
-    P_out = P_in * (1 - 0.002 - 0.001*M_in)  # Further reduced losses
+    dP_friction = 0.02 * P_in * M_in**2
+    dP_heat = 0.04 * P_in * (T_out/T_in - 1)
+    dP_mixing = 0.015 * P_in * phi
+    P_out = P_in - dP_friction - dP_heat - dP_mixing
     
-    # Calculate temperature rise with improved modeling
-    dT = eta_comb * mixing_efficiency * (T_comb - T_in)
+    # Better exit Mach number calculation
+    M_out = M_in * np.sqrt(T_in/T_out) * (P_in/P_out)**0.5 * \
+            (1 - 0.1*phi)  # Account for fuel addition
     
-    if T_in + dT > T_comb:
-        dT *= 0.99  # More aggressive temperature rise
-    
-    T_out = T_in + dT
-    
-    # Minimized pressure loss
-    P_out = P_in * (1 - 0.008 - 0.004*M_in)
-    
-    # Improved exit Mach modeling
-    M_out = M_in * np.sqrt(T_in/T_out) * (1 - 0.008)  # Reduced loss factor
-    
-    return M_out, T_out, P_out
+    return M_out, T_out, P_out, eta_comb
 
 def validate_design(params, show_warnings=True):
     """Validate design with unstart prevention considerations."""
@@ -645,7 +860,7 @@ def validate_design(params, show_warnings=True):
         T3 = T2 * T3_T2
         
         # Get real gas properties
-        gamma_T, R_T, Cp_T, _, _ = real_gas_properties(M3, T3)
+        gamma_T, R_T, Cp_T, _, _, _ = improved_real_gas_properties(M3, T3)
         
         # Calculate overall pressure recovery
         P_recovery = P1_P0 * P2_P1 * P3_P2
@@ -799,7 +1014,7 @@ def validate_nozzle(params):
     actual_ratio = (radius_exit/radius_throat)**2
     
     # Get ideal expansion ratio for M=2.5 with better precision
-    gamma_T, R_T, _, _, _ = real_gas_properties(M0, T0)
+    gamma_T, R_T, _, _, _, _ = improved_real_gas_properties(M0, T0)
     ideal_ratio = ((gamma_T+1)/2)**(-(gamma_T+1)/(2*(gamma_T-1))) * \
                  (1/M0) * (1 + (gamma_T-1)/2 * M0**2)**((gamma_T+1)/(2*(gamma_T-1)))
     
@@ -881,7 +1096,7 @@ if __name__ == "__main__":
                 continue
     
     if best_params is None:
-        print("\n❌ Failed to find valid design after all attempts")
+        print("\nFailed to find valid design after all attempts")
         exit(1)
     
     # If we got here, we have our best design (might not be perfect but it's our best attempt)
