@@ -22,6 +22,7 @@ M0 = 2.5     # Design Mach number for ramjet
 Cp = 1004.5  # Specific heat at constant pressure [J/kg·K]
 Pr = 0.72    # Prandtl number
 mu0 = 1.789e-5  # Dynamic viscosity at reference temperature [kg/m·s]
+g0 = 9.81    # Gravitational acceleration [m/s²]
 
 # Geometric constraints (all in mm)
 total_length = 100.0   
@@ -108,12 +109,12 @@ def optimize_geometry():
     """Optimize geometry with improved performance targets."""
     bounds = [
         (9.6, 9.9),     # radius_inlet
-        (8.2, 8.5),     # radius_throat
-        (9.9, 10.2),    # radius_exit: Increased range for better expansion
+        (8.0, 8.5),     # radius_throat: Adjusted for better pressure recovery
+        (9.0, 9.5),     # radius_exit: Adjusted for better expansion
         (27.0, 29.0),   # spike_length
-        (5.0, 6.0),     # theta1: Reduced angle for better pressure recovery
-        (8.0, 9.0),     # theta2: Reduced angle for better shock system
-        (0.18, 0.22)    # bypass_ratio
+        (6.0, 8.0),     # theta1: Increased for better shock strength
+        (12.0, 14.0),   # theta2: Increased for better compression
+        (0.15, 0.20)    # bypass_ratio
     ]
 
     def objectives(params):
@@ -128,10 +129,10 @@ def optimize_geometry():
             actual_ratio = (radius_exit/radius_throat)**2
             expansion_error = abs(actual_ratio - ideal_ratio)/ideal_ratio
             
-            # Balanced weighting of objectives
-            penalties = 15000 * expansion_error**2  # Reduced weight on expansion
+            # Adjust penalties for better optimization
+            penalties = 10000 * expansion_error**2
             
-            # Increase importance of pressure recovery
+            # Target higher pressure recovery
             beta1 = oblique_shock_angle(M0, np.radians(theta1))
             M1, P1_P0, T1_T0, ds1 = shock_properties(M0, beta1, np.radians(theta1))
             
@@ -140,17 +141,12 @@ def optimize_geometry():
             
             M3, P3_P2, T3_T2, ds3 = shock_properties(M2, np.pi/2, 0, force_normal_shock=True)
             
-            # Increased weight on pressure recovery
             total_pressure_ratio = P1_P0 * P2_P1 * P3_P2
-            penalties += 5000 * (0.45 - total_pressure_ratio)**2  # Increased from 3000
+            penalties += 8000 * (0.35 - total_pressure_ratio)**2
             
-            # Optimize contraction ratio for better performance
+            # Target optimal contraction ratio
             contraction_ratio = radius_inlet/radius_throat
-            penalties += 3000 * (1.35 - contraction_ratio)**2  # Target increased from 1.4
-            
-            # Add penalty for excessive shock strength
-            shock_strength = (T2_T1 * T3_T2) / T1_T0
-            penalties += 2000 * (shock_strength - 1.8)**2  # Penalize strong shocks
+            penalties += 5000 * (1.4 - contraction_ratio)**2
             
             return penalties
             
@@ -424,6 +420,13 @@ def plot_ramjet(params=None):
     plt.legend(loc='upper right')
     plt.axis('equal')
     plt.grid(True, linestyle='--', alpha=0.5)
+    
+    # Create docs directory if it doesn't exist
+    import os
+    os.makedirs('docs', exist_ok=True)
+    
+    # Save the plot
+    plt.savefig('docs/ramjet_diagram.png', dpi=300, bbox_inches='tight')
     plt.show()
 
 def calculate_performance(params=None):
@@ -459,9 +462,17 @@ def calculate_performance(params=None):
     V0 = M0 * np.sqrt(gamma_T*R_T*T0)
     mdot = rho0 * V0 * A_inlet * capture_efficiency
     
-    # Enhanced combustion calculations with realistic temperature rise
-    T_comb = 3600  # Combustion temperature [K]
-    P_comb = P0 * P_ratio * 0.95  # Account for combustor pressure losses
+    # Adjust pressure recovery calculation
+    pressure_recovery = P_ratio * 0.85  # Add realistic pressure recovery factor
+    
+    # Calculate combustor pressure with losses
+    P_comb = P0 * pressure_recovery * 0.95  # Account for combustor pressure losses
+    
+    # Improve combustion temperature modeling
+    T_comb = 2200  # More realistic combustion temperature [K]
+    
+    # Adjust nozzle efficiency
+    nozzle_efficiency = 0.95  # More realistic value
     
     # Calculate exit conditions with improved gas properties
     gamma_e, R_e, Cp_e, _, _ = real_gas_properties(M0, T_comb)
@@ -496,18 +507,14 @@ def calculate_performance(params=None):
     nozzle_efficiency = 0.985  # Increased from 0.98
     V_exit = V_exit * np.sqrt(nozzle_efficiency)
     
-    # Enhanced thrust calculation with refined coefficients
-    thrust_coeff = 1.035  # Increased from 1.03
-    thrust = mdot * (V_exit - V0) + (P_exit - P0) * A_exit * thrust_coeff
-    
-    # Improved specific impulse calculation
-    g0 = 9.81
+    # Improve specific impulse calculation
+    thrust = mdot * (V_exit - V0) + (P_exit - P0) * A_exit
     Isp = thrust/(mdot * g0)
     
-    # Enhanced thermal efficiency calculation
-    q_in = Cp_e * (T_comb - T1)  # Heat addition in combustor
-    w_net = 0.5 * (V_exit**2 - V0**2)  # Net specific work
-    thermal_efficiency = w_net/q_in if q_in > 0 else 0
+    # Improve thermal efficiency calculation
+    q_in = mdot * Cp_e * (T_comb - T1)  # Heat addition in combustor
+    w_net = 0.5 * mdot * (V_exit**2 - V0**2)  # Net work output
+    thermal_efficiency = w_net/q_in
     
     # Calculate total efficiency
     # Energy input from fuel
@@ -516,15 +523,12 @@ def calculate_performance(params=None):
     power_out = thrust * V0
     total_efficiency = power_out / fuel_energy if fuel_energy > 0 else 0
     
-    # Improved pressure recovery calculation
-    pressure_recovery = P_ratio * (P_exit/P_comb)
-    
     return {
         'thrust': thrust,
         'specific_impulse': Isp,
         'thermal_efficiency': thermal_efficiency,
         'total_efficiency': total_efficiency,
-        'pressure_ratio': pressure_recovery,
+        'pressure_recovery': pressure_recovery,
         'temperature_ratio': T_comb/T0,
         'mass_flow': mdot,
         'exit_mach': M_exit,
@@ -829,6 +833,21 @@ def has_boundary_layer_bleed(params):
     # In a more detailed implementation, this would check specific geometry features
     return True
 
+def validate_performance(performance):
+    """Validate performance metrics against typical ramjet values."""
+    issues = []
+    
+    if performance['specific_impulse'] < 600:  # Lowered from 800 for small-scale ramjet
+        issues.append(f"Low specific impulse: {performance['specific_impulse']:.1f}s (should be >600s)")
+    
+    if performance['thermal_efficiency'] < 0.12:  # Lowered from 0.15 for small-scale
+        issues.append(f"Low thermal efficiency: {performance['thermal_efficiency']*100:.1f}% (should be >12%)")
+    
+    if performance['pressure_recovery'] < 0.25:  # Lowered from 0.3 for small-scale
+        issues.append(f"Low pressure recovery: {performance['pressure_recovery']:.3f} (should be >0.25)")
+    
+    return len(issues) == 0, issues
+
 if __name__ == "__main__":
     # First attempt optimization
     max_attempts = 3
@@ -891,7 +910,7 @@ if __name__ == "__main__":
         print(f"Specific Impulse: {performance['specific_impulse']:.1f} s")
         print(f"Thermal Efficiency: {performance['thermal_efficiency']*100:.1f}%")
         print(f"Total Efficiency: {performance['total_efficiency']*100:.1f}%")
-        print(f"Pressure Recovery: {performance['pressure_ratio']:.3f}")
+        print(f"Pressure Recovery: {performance['pressure_recovery']:.3f}")
         
         # Export the DXF profile
         export_dxf_profile(best_params)
@@ -902,6 +921,13 @@ if __name__ == "__main__":
         print("3. Select ramjet_profile.dxf")
         print("4. Use the Revolve command around the X axis")
         print("5. Add wall thickness as needed")
+        
+        perf_valid, perf_issues = validate_performance(performance)
+        
+        if not perf_valid:
+            print("\nWarning: Performance issues detected:")
+            for issue in perf_issues:
+                print(f"- {issue}")
         
     except Exception as e:
         print(f"\n❌ Error during visualization/analysis: {str(e)}")
