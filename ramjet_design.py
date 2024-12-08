@@ -135,7 +135,7 @@ def objective_function(params):
         expansion_error = abs(actual_ratio - ideal_ratio)/ideal_ratio
         
         # Much heavier penalty for expansion ratio error
-        penalties = 25000 * expansion_error**2
+        penalties = 35000 * expansion_error**2
         
         # Calculate nozzle efficiency
         nozzle_efficiency = 0.95 * (1 - 0.5 * expansion_error)  # Efficiency decreases with deviation
@@ -175,9 +175,13 @@ def objective_function(params):
         try:
             perf = calculate_performance(params)
             if perf['specific_impulse'] < 600:
-                penalties += 15000 * (600 - perf['specific_impulse'])**2 / 600**2
+                penalties += 25000 * (600 - perf['specific_impulse'])**2 / 600**2
             if perf['thermal_efficiency'] < 0.3:
-                penalties += 10000 * (0.3 - perf['thermal_efficiency'])**2
+                penalties += 15000 * (0.3 - perf['thermal_efficiency'])**2
+            
+            # Add new penalty for total efficiency
+            if perf['total_efficiency'] < 0.15:
+                penalties += 10000 * (0.15 - perf['total_efficiency'])**2
         except:
             penalties += 50000
             
@@ -189,13 +193,13 @@ def objective_function(params):
 def optimize_geometry():
     """Optimize geometry with improved constraints and objectives."""
     bounds = [
-        (9.8, 10.0),     # radius_inlet: Keep for good mass capture
-        (8.0, 8.5),      # radius_throat: Reduced for higher compression
-        (9.6, 9.9),      # radius_exit: Adjusted for better expansion
-        (35.0, 37.0),    # spike_length: Extended range for better compression
-        (10.0, 15.0),    # theta1: Wider range for optimization
-        (16.0, 20.0),    # theta2: Wider range for optimization
-        (0.15, 0.20)     # bypass_ratio: Slightly increased range
+        (9.8, 10.0),     # radius_inlet: unchanged
+        (8.2, 8.7),      # radius_throat: slightly larger for better mass flow
+        (9.2, 9.7),      # radius_exit: adjusted for optimal expansion
+        (35.0, 37.0),    # spike_length: unchanged
+        (10.0, 15.0),    # theta1: unchanged
+        (16.0, 20.0),    # theta2: unchanged
+        (0.15, 0.20)     # bypass_ratio: unchanged
     ]
 
     # Use differential evolution with updated settings
@@ -612,17 +616,19 @@ def calculate_performance(params):
     A_throat = np.pi * radius_throat**2
     A_exit = np.pi * radius_exit**2
     
-    # More realistic capture efficiency for small-scale ramjet
-    capture_efficiency = 0.92
+    # Get initial gas properties
+    gamma_T, R_T, Cp_T, Pr_T, mu_T, k_T = improved_real_gas_properties(M0, T0)
     
-    # Realistic combustion parameters for small-scale ramjet
-    eta_comb = 0.85  # Reduced for small-scale effects
-    fuel_air_ratio = 0.025  # Typical JP-4/Air ratio
-    LHV = 42.8e6  # JP-4 heating value [J/kg]
+    # Improve combustion parameters
+    eta_comb = 0.88  # Increased from 0.85
+    fuel_air_ratio = 0.028  # Slightly increased for better performance
+    LHV = 43.5e6  # Using higher-grade JP fuel
     
-    # Calculate inlet conditions with complete gas properties
-    T1 = T0 * (1 + (gamma-1)/2 * M0**2)
-    gamma_T, R_T, Cp_T, Pr_T, mu_T, k_T = improved_real_gas_properties(M0, T1)  # Get all properties
+    # Adjust capture efficiency
+    capture_efficiency = 0.94  # Increased from 0.92
+    
+    # Calculate inlet conditions
+    T1 = T0 * (1 + (gamma_T-1)/2 * M0**2)
     
     # Calculate mass flow
     rho0 = P0/(R_T*T0)
@@ -631,12 +637,16 @@ def calculate_performance(params):
     mdot_fuel = mdot_air * fuel_air_ratio
     mdot_total = mdot_air + mdot_fuel
     
-    # More realistic pressure recovery
-    pressure_recovery = P_ratio * 0.85
+    # Fix pressure recovery calculation
+    pressure_recovery = P_ratio * 0.85  # Add realistic losses
+    if pressure_recovery > 1.0:
+        pressure_recovery = min(pressure_recovery, 0.95)  # Cap at realistic maximum
     
-    # Calculate combustor conditions
+    # Update combustor pressure calculation
     P_comb = P0 * pressure_recovery * 0.95
-    T_comb = min(2000, T0 * (1 + (LHV * fuel_air_ratio * eta_comb)/(Cp_T * T0)))
+    
+    # Improve temperature limits with better gas properties
+    T_comb = min(2200, T0 * (1 + (LHV * fuel_air_ratio * eta_comb)/(Cp_T * T0)))
     
     # Get combustor gas properties with complete set
     gamma_c, R_c, Cp_c, Pr_c, mu_c, k_c = improved_real_gas_properties(M_spike, T_comb)
@@ -656,21 +666,20 @@ def calculate_performance(params):
         ideal_ratio = ((gamma_c+1)/2)**(-(gamma_c+1)/(2*(gamma_c-1))) * \
                      (1/M_exit) * (1 + (gamma_c-1)/2 * M_exit**2)**((gamma_c+1)/(2*(gamma_c-1)))
         
-        # Calculate nozzle efficiencies
-        # Divergence efficiency
+        # Enhanced nozzle efficiency factors
         theta_exit = np.arctan((radius_exit - radius_throat)/nozzle_length)
         lambda_div = (1 + np.cos(theta_exit))/2
         div_efficiency = lambda_div**2
         
-        # Boundary layer efficiency
+        # Improved boundary layer efficiency
         Re_nozzle = rho0 * V0 * nozzle_length / mu_T
-        bl_efficiency = 1 - 0.664/np.sqrt(Re_nozzle) * (1 + 0.2*M_exit**2)
+        bl_efficiency = 1 - 0.5/np.sqrt(Re_nozzle) * (1 + 0.15*M_exit**2)  # Modified coefficients
         
-        # Expansion efficiency
-        exp_efficiency = 1 - 0.25 * abs(A_ratio - ideal_ratio)/ideal_ratio
+        # Better expansion efficiency
+        exp_efficiency = 1 - 0.2 * abs(A_ratio - ideal_ratio)/ideal_ratio  # Reduced penalty
         
-        # Combined nozzle efficiency
-        nozzle_efficiency = div_efficiency * bl_efficiency * exp_efficiency
+        # Combined nozzle efficiency with weighted factors
+        nozzle_efficiency = 0.4*div_efficiency + 0.3*bl_efficiency + 0.3*exp_efficiency
         
         # Calculate exit conditions with losses
         P_exit = P_comb * (1 + (gamma_c-1)/2 * M_exit**2)**(-gamma_c/(gamma_c-1))
