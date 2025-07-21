@@ -1,0 +1,14 @@
+[project]
+name = "ramjet"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "ezdxf>=1.4.2",
+    "matplotlib>=3.10.3",
+    "numba>=0.57.0",
+    "numpy<2.3",
+    "scipy>=1.16.0",
+    "tqdm>=4.67.1",
+]
